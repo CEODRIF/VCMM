@@ -2,8 +2,8 @@
 
 The stage order is declared here; the actual stage handlers live in the
 processors: ingestion (validating, Phase 3), analysis
-(transcribing/analyzing, Phase 4), rendering (rendering, Phase 5 — base
-pipeline without subtitle burn-in yet; that is Phase 5b). ``handler`` stays
+(transcribing/analyzing, Phase 4), rendering (rendering, Phase 5A cut/
+reframe/encode + Phase 5B animated subtitle burn-in). ``handler`` stays
 ``None``: dispatch is done by the worker, not this table.
 """
 

@@ -8,21 +8,24 @@ ClipForge AI is a web application that transforms long-form videos into short-fo
 - Vertical 9:16 output at 1080x1920 (1080p) with modern animated subtitles.
 - Individual downloads and ZIP batch downloads.
 
-> **Status: Phase 5A — rendering foundation (clip rendering pipeline).**
-> On top of Phase 4 (local Whisper transcription, clip detection and
-> explainable scoring, jobs parked at `analyzing`) and Phase 3 (real direct
-> uploads, FFprobe validation, Postgres job queue with atomic claiming,
-> leases and crash recovery), the worker now CLAIMS parked `analyzing` jobs
-> into a `rendering` stage, re-downloads the verified source, cuts each
-> detected clip window with a managed FFmpeg subprocess (rotation-correct,
-> aspect-ratio-preserving reframe to exact 1080x1920), validates every
-> rendered file against a strict output contract (MP4 / H.264 / AAC /
-> yuv420p / 1080x1920 / zero rotation / duration tolerance), uploads it to
-> the private `clipforge-clips` bucket, and marks the job `completed` ONLY
-> through a database guard that requires every clip to be `ready` with a
-> stored object path. Rendered output is NOT yet displayed or downloadable
-> (Phases 5b/6): subtitle burn-in arrives in Phase 5b, downloads in Phase 6.
-> See `docs/ROADMAP.md`.
+> **Status: Phase 5B — animated word-synchronized subtitles.**
+> On top of Phase 5A (clip rendering pipeline: download, cut/reframe to
+> 1080x1920, FFprobe output contract, upload, DB-guarded completion), the
+> worker now burns modern animated subtitles into every rendered clip — in
+> the SAME FFmpeg command (libass `ass=` filter): the analysis stage
+> persists each clip's REAL word timings (`clips.captions`), the renderer
+> generates a deterministic ASS file (karaoke per-word progression, 3 words
+> per line, bottom safe area, outline; Arabic RTL / English / German,
+> configurable font and colors), and a clip without usable words renders
+> exactly as Phase 5A. (Phase 5A recap: the worker claims parked
+> `analyzing` jobs into a `rendering` stage, re-downloads the verified
+> source, cuts each detected clip window with a managed FFmpeg subprocess
+> — rotation-correct, aspect-ratio-preserving reframe to exact 1080x1920 —
+> validates the output (MP4 / H.264 / AAC / yuv420p / zero rotation /
+> duration tolerance), uploads to the private `clipforge-clips` bucket, and
+> completes the job ONLY through the database guard that requires every
+> clip `ready` with a stored object path.) Rendered output is NOT yet
+> displayed or downloadable (Phase 6). See `docs/ROADMAP.md`.
 
 ## Technology stack
 
@@ -33,7 +36,7 @@ ClipForge AI is a web application that transforms long-form videos into short-fo
  | Database  | Supabase (Postgres) with Row Level Security                       |
  | Storage   | Supabase Storage (private buckets, signed upload URLs)            |
  | Worker    | Python 3.12, FastAPI, Pydantic, FFprobe, structured JSON logging  |
-  | Pipeline  | Local Whisper (faster-whisper, optional), FFmpeg rendering (Phase 5A; subtitles: Phase 5b) |
+  | Pipeline  | Local Whisper (faster-whisper, optional), FFmpeg rendering (Phase 5A) + animated subtitle burn-in (Phase 5B, libass) |
  | Tests/CI  | Vitest, pytest, GitHub Actions                                    |
 
 ## Architecture overview
@@ -161,6 +164,9 @@ Copy `.env.example` to `.env.local` and fill in what applies. **Never commit rea
   | `WORKER_RENDER_CONCURRENCY` | worker | Clips rendered in parallel per job (default 2; 1-8) |
   | `WORKER_RENDER_TIMEOUT_SECONDS` | worker | Wall-clock budget for one clip render (default 900; ≤ 7200) |
   | `WORKER_MAX_CLIP_SIZE_BYTES` | worker | Reject a rendered clip larger than this (default 200 MiB) |
+  | `WORKER_CAPTION_FONT_FAMILY` / `WORKER_CAPTION_FONT_SIZE` | worker | Subtitle font (default `DejaVu Sans`, 88px; 24-200) |
+  | `WORKER_CAPTION_BASE_COLOR` / `WORKER_CAPTION_HIGHLIGHT_COLOR` / `WORKER_CAPTION_OUTLINE_COLOR` | worker | Subtitle colors, RRGGBB (default `FFFFFF` / `00D7FF` / `000000`) |
+  | `WORKER_CAPTION_OUTLINE_WIDTH` / `WORKER_CAPTION_MARGIN_V` / `WORKER_CAPTION_WORDS_PER_LINE` / `WORKER_CAPTION_UPPERCASE` | worker | Subtitle layout (default 6 / 520 / 3 / true) |
 
 Server-side validation is implemented in `src/lib/env.ts` (zod) and
 `worker/app/config/settings.py` (Pydantic).
@@ -169,19 +175,20 @@ Server-side validation is implemented in `src/lib/env.ts` (zod) and
 
 1. Create a **development** Supabase project (free tier is fine).
 2. Store the project URL and keys in your environment (see table above).
-  3. Apply the six migrations to the development project (Supabase dashboard
+  3. Apply the seven migrations to the development project (Supabase dashboard
     SQL editor or Supabase CLI), in order:
     - `supabase/migrations/20261113000000_initial_schema.sql` (Phase 1)
     - `supabase/migrations/20261114000000_phase2_job_settings_and_session_lookup.sql` (Phase 2)
     - `supabase/migrations/20261115000000_phase3_queue_and_ingestion.sql` (Phase 3 — queue columns, 9-state machine, restricted worker RPCs)
     - `supabase/migrations/20261115000001_phase3_storage_buckets.sql` (Phase 3 — private storage buckets; Supabase-specific)
     - `supabase/migrations/20261116000000_phase4_clip_analysis.sql` (Phase 4 — clip score/scoring columns, stage-aware queue RPCs, `analyzing` parked state)
-    - `supabase/migrations/20261117000000_phase5_rendering.sql` (Phase 5 — `jobs.render_attempts` budget, `rendering` stage in the queue RPCs, `complete_job_rendering` guard, clips index)
+    - `supabase/migrations/20261117000000_phase5_rendering.sql` (Phase 5A — `jobs.render_attempts` budget, `rendering` stage in the queue RPCs, `complete_job_rendering` guard, clips index)
+    - `supabase/migrations/20261120000000_phase5b_captions.sql` (Phase 5B — `clips.captions jsonb`: the clip's real word-level timings for subtitle burn-in)
 
-All six are executed and asserted against a real PostgreSQL 16 engine (WASM)
+All seven are executed and asserted against a real PostgreSQL 16 engine (WASM)
 in the test suite (`tests/database/rls.test.ts`, `tests/database/queue.test.ts`,
 `tests/database/phase4-queue.test.ts`, `tests/database/storage-buckets.test.ts`,
-`tests/database/phase5-rendering.test.ts`),
+`tests/database/phase5-rendering.test.ts`, `tests/database/phase5b-captions.test.ts`),
 including deny-by-default RLS, the queue RPCs' atomicity/lease semantics, the
 Phase 4 stage transitions (incl. crash recovery and the parked state), the
 Phase 5 rendering lifecycle (parked claim → rendering, render-retry requeue,
@@ -251,10 +258,17 @@ storage/transcription/persistence failures, ownership-loss abort, temp
 cleanup)** and **rendering lifecycle (full success + upload, resume skipping
 `ready` clips, no-clips permanent failure, download / FFmpeg / validation /
 upload / persistence failures, lease renewal loss, cancellation, progress
-and completion refusals, sibling cancellation on first clip error,
-idempotent retry without duplicate uploads)**, worker loop (stage-aware
-dispatch incl. Phase 5 rendering, missing-renderer safe release, backoff,
-graceful shutdown) (worker).
+ and completion refusals, sibling cancellation on first clip error,
+ idempotent retry without duplicate uploads)**, **captions (Phase 5B:
+ deterministic ASS engine — timing sanitization, overlap resolution, line
+ segmentation, escaping, RTL/Unicode; real-FFmpeg burn-in PROVEN in output
+ pixels: active-word progression at multiple timestamps, portrait + rotated
+ sources, Arabic/German, no override-block injection, style colors, timeout
+ / cancellation cleanup; processor wiring — clip-relative conversion,
+ disabled = Phase 5A, corrupt payload degrades to plain render, resume,
+ transient failure)**, worker loop (stage-aware dispatch incl. Phase 5
+ rendering, missing-renderer safe release, backoff, graceful shutdown)
+ (worker).
 
 The media tests generate their synthetic videos on the fly (no binary fixtures
 committed). They use `ffprobe`/`ffmpeg` from PATH, or the npm statics
@@ -289,6 +303,7 @@ pull requests:
  | Worker analysis: audio extraction + local Whisper transcription + clip detection/scoring | **Done** (optional `faster-whisper` dependency; honest `transcription_unavailable` failure when not installed; word-level timestamps; 60-180s windows; explainable scores persisted to `clips`) |
   | Jobs parked at `analyzing` with detected clips | **Done** (stage-aware queue; crash recovery; bounded retries) |
   | Clip rendering pipeline (Phase 5A): claim parked → render cut/reframe/encode to 1080x1920 H.264+AAC → validate → upload to `clipforge-clips` → DB-guarded `completed` | **Done** (rotation-correct, aspect-ratio-preserving; resume + bounded render retries; no false `completed` possible) |
+  | Animated subtitles (Phase 5B): real word timings persisted at analysis → deterministic ASS (karaoke per-word highlight, RTL/Unicode-safe) burned into the SAME FFmpeg render; job-level `captions_enabled` toggle; no words / disabled = Phase 5A output | **Done** (burn-in proven in rendered pixels; corrupt payloads degrade to plain render, never crash, never fabricate) |
   | Subtitle burn-in / downloads | **Not implemented** (Phase 5b / Phase 6) |
 
 ## Known limitations
@@ -297,14 +312,20 @@ pull requests:
   queue/storage semantics are fully tested against a real PostgreSQL engine
   (WASM), but nothing has been applied to a live project — none was provided.
   End-to-end upload → queue → worker ingestion → rendering therefore still
-  requires: creating/applying the six migrations to a verified development
+  requires: creating/applying the seven migrations to a verified development
   project, setting the service-role credentials, and running the worker.
   Until then, the app runs Phase 1-2 behavior and upload creation returns a
   clear error when Supabase is not configured.
-- Phase 5A renders clips but does NOT yet burn in subtitles (that is Phase
-  5b) and the Results page still shows placeholder data: rendered clips are
-  stored in the private `clipforge-clips` bucket (object verified in tests,
-  never exposed publicly) but there is no download API yet (Phase 6).
+- Phase 5B burns animated subtitles into the clips, but the Results page
+  still shows placeholder data: rendered clips are stored in the private
+  `clipforge-clips` bucket (object verified in tests, never exposed publicly)
+  and there is no download API yet (Phase 6).
+- Subtitle rendering quality depends on the worker host's fonts/fontconfig:
+  the default font is DejaVu Sans (pinned in CI). Arabic contextual shaping
+  additionally requires an FFmpeg build with libharfbuzz (the CI apt build
+  has it; the local ffmpeg-static does not — Arabic then renders with
+  isolated glyphs, still legible and correctly ordered). No fonts are
+  bundled and no paid font service is used.
 - Transcription runs locally with the **optional** `faster-whisper`
   dependency (`worker/requirements-optional.txt`). Without it the worker
   starts normally and analysis jobs fail with a clear permanent

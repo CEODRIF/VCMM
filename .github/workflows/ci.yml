@@ -60,12 +60,14 @@ jobs:
 
       - name: Install FFmpeg/FFprobe (media + rendering integration tests)
         # The worker media/rendering tests (FFprobe validation, audio
-        # extraction, real-FFmpeg renderer + processor lifecycles) skip
-        # cleanly when no binaries are available — so they must be present
-        # here, or they are silently skipped in CI.
+        # extraction, real-FFmpeg renderer + processor lifecycles, Phase 5B
+        # subtitle burn-in) skip cleanly when no binaries are available —
+        # so they must be present here, or they are silently skipped in CI.
+        # fonts-dejavu-core pins the deterministic caption font (DejaVu Sans)
+        # for the libass integration tests.
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg fonts-dejavu-core
 
       - name: Python syntax check
         run: python -m compileall -q app tests

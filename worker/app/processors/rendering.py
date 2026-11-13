@@ -30,6 +30,7 @@ budget is exhausted.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import shutil
 from pathlib import Path
@@ -48,7 +49,8 @@ from ..queue.models import (
     PERMANENT_ERROR_CATEGORIES,
 )
 from ..queue.supabase_queue import SupabaseQueue
-from ..rendering.base import BaseRenderer, RenderSpec
+from ..rendering.base import BaseRenderer, CaptionStyle, RenderSpec
+from ..rendering.captions import parse_caption_payload
 from ..rendering.ffmpeg import FFmpegError
 from ..rendering.validation import RenderValidationError, verify_render_output
 from ..storage.clip_store import ClipsPersistenceError, SupabaseClipStore
@@ -147,7 +149,25 @@ class RenderProcessor:
             await self._report(job_id, worker_id, _PROGRESS_RENDER_BASE)
 
             # 4) Render the remaining clips (bounded concurrency, first error wins).
-            clip_error = await self._render_clips(job_id, worker_id, destination, todo)
+            #    The job-level caption toggle (Phase 2 column) + the configured
+            #    style form the base spec; per-clip real words come from the
+            #    persisted `clips.captions` payload (Phase 5B).
+            captions_enabled = bool(job.get("captions_enabled", True))
+            base_spec = RenderSpec(
+                captions=captions_enabled,
+                caption_style=CaptionStyle(
+                    font_family=self._settings.caption_font_family,
+                    font_size=self._settings.caption_font_size,
+                    base_color=self._settings.caption_base_color,
+                    highlight_color=self._settings.caption_highlight_color,
+                    outline_color=self._settings.caption_outline_color,
+                    outline_width=self._settings.caption_outline_width,
+                    margin_v=self._settings.caption_margin_v,
+                    words_per_line=self._settings.caption_words_per_line,
+                    uppercase=self._settings.caption_uppercase,
+                ),
+            )
+            clip_error = await self._render_clips(job_id, worker_id, destination, todo, base_spec)
             if clip_error is not None:
                 category, permanent = self._categorize(clip_error)
                 await self._safe_fail(job_id, worker_id, category, str(clip_error), permanent=permanent)
@@ -184,6 +204,7 @@ class RenderProcessor:
         worker_id: str,
         destination: Path,
         todo: list[dict[str, Any]],
+        base_spec: RenderSpec,
     ) -> Exception | None:
         """Renders every remaining clip; returns the first clip error or None.
 
@@ -196,7 +217,6 @@ class RenderProcessor:
             return None
 
         total = len(todo)
-        spec = RenderSpec()
         profile = self._renderer.profile
         semaphore = asyncio.Semaphore(self._settings.render_concurrency)
         state = {"done": 0}
@@ -210,6 +230,15 @@ class RenderProcessor:
                 raise FFmpegError(ERROR_RENDER_FAILED, "clip row is missing a valid window") from exc
             if not (0 <= start < end):
                 raise FFmpegError(ERROR_RENDER_FAILED, "clip window is invalid")
+
+            # Captions (Phase 5B): attach the clip's REAL words (persisted by
+            # the analysis stage, absolute -> clip-relative). No valid words
+            # (or captions disabled) -> the exact Phase 5A render.
+            spec = base_spec
+            if base_spec.captions:
+                words = parse_caption_payload(clip.get("captions"), start, end - start)
+                if words:
+                    spec = dataclasses.replace(base_spec, caption_words=tuple(words))
 
             async with semaphore:
                 out_file = destination.parent / f"clip-{index}.mp4"

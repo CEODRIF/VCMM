@@ -25,8 +25,12 @@ resolution, pixel format, rotation, duration) is enforced by
 :func:`app.rendering.validation.verify_render_output` in the processor —
 a non-conforming clip is never uploaded.
 
-Subtitle burn-in is Phase 5b: ``spec.captions`` is carried by the contract
-but ignored here.
+Subtitles (Phase 5B) are burned in the SAME command via a libass ``ass=``
+filter appended after the reframe plan (PlayRes == output size, so no
+rescaling): the per-job temp directory holds the generated ASS file, whose
+path is filtergraph-escaped and removed on EVERY path (success, failure,
+timeout, cancellation). With no caption words the command line is exactly
+the Phase 5A one.
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ from typing import Optional
 
 from ..queue.models import ERROR_RENDER_FAILED
 from .base import BaseRenderer, RenderSpec
+from .captions import CaptionsError, build_captions_ass, filter_escape, write_ass
 from .ffmpeg import FFmpegError, run_ffmpeg
 from .profiles import RenderProfile, normalize_rotation_cw
 from .validation import mp4_rotation_degrees, rotation_of
@@ -104,6 +109,26 @@ class FFmpegRenderer(BaseRenderer):
         rotate_filter = _ROTATION_FILTERS[cw]
         filter_chain = f"{rotate_filter},{base_plan}" if rotate_filter else base_plan
 
+        # Captions (Phase 5B): real words only, prepared BEFORE the process
+        # starts (deterministic), written into the per-job temp dir, and
+        # removed on every path. No words -> the exact Phase 5A command.
+        ass_path: Path | None = None
+        if spec.captions and spec.caption_words:
+            ass_text = build_captions_ass(
+                spec.caption_words,
+                spec.caption_style,
+                duration=end - start,
+                play_res_x=spec.width,
+                play_res_y=spec.height,
+            )
+            if ass_text is not None:
+                try:
+                    ass_path = write_ass(ass_text, output.parent / "captions.ass")
+                    filter_chain = f"{filter_chain},ass={filter_escape(str(ass_path))}"
+                except (CaptionsError, OSError):
+                    ass_path = None
+                    raise FFmpegError(ERROR_RENDER_FAILED, "captions could not be prepared") from None
+
         # All options before -i are INPUT options: -ss/-t seek the input
         # (fast, bounded). -noautorotate disables FFmpeg's default display-
         # matrix auto-rotation: the source rotation is applied EXPLICITLY by
@@ -122,7 +147,11 @@ class FFmpegRenderer(BaseRenderer):
             *self._profile.ffmpeg_container_args(),
             str(output),
         ]
-        await run_ffmpeg(self._ffmpeg, args, self._timeout, output_file=output)
+        try:
+            await run_ffmpeg(self._ffmpeg, args, self._timeout, output_file=output)
+        finally:
+            if ass_path is not None:
+                ass_path.unlink(missing_ok=True)
         return str(output)
 
     async def _probe_source(self, source: Path) -> tuple[int, int, float]:

@@ -202,3 +202,51 @@ def test_render_settings_bounds():
         Settings(render_timeout_seconds=7201)
     with pytest.raises(ValidationError):
         Settings(max_clip_size_bytes=0)
+
+
+def test_phase5b_caption_defaults_are_safe():
+    settings = Settings()
+    assert settings.caption_font_family == "DejaVu Sans"
+    assert settings.caption_font_size == 88
+    assert settings.caption_base_color == "FFFFFF"
+    assert settings.caption_highlight_color == "00D7FF"
+    assert settings.caption_outline_color == "000000"
+    assert settings.caption_outline_width == 6
+    assert settings.caption_margin_v == 520
+    assert settings.caption_words_per_line == 3
+    assert settings.caption_uppercase is True
+
+
+def test_phase5b_env_vars_are_picked_up(monkeypatch):
+    monkeypatch.setenv("WORKER_CAPTION_FONT_FAMILY", "Liberation Sans")
+    monkeypatch.setenv("WORKER_CAPTION_FONT_SIZE", "72")
+    monkeypatch.setenv("WORKER_CAPTION_HIGHLIGHT_COLOR", "ffd700")
+    monkeypatch.setenv("WORKER_CAPTION_UPPERCASE", "false")
+    settings = Settings()
+    assert settings.caption_font_family == "Liberation Sans"
+    assert settings.caption_font_size == 72
+    assert settings.caption_highlight_color == "FFD700"  # normalized uppercase
+    assert settings.caption_uppercase is False
+
+
+def test_caption_color_and_font_validation():
+    with pytest.raises(ValidationError):
+        Settings(caption_base_color="GGGGGG")
+    with pytest.raises(ValidationError):
+        Settings(caption_highlight_color="FFF")
+    with pytest.raises(ValidationError):
+        Settings(caption_outline_color="12345")
+    with pytest.raises(ValidationError):
+        Settings(caption_font_family="DejaVu{Sans}")
+    with pytest.raises(ValidationError):
+        Settings(caption_font_family="")
+    with pytest.raises(ValidationError):
+        Settings(caption_font_family="a" * 65)
+    with pytest.raises(ValidationError):
+        Settings(caption_font_size=23)
+    with pytest.raises(ValidationError):
+        Settings(caption_font_size=201)
+    with pytest.raises(ValidationError):
+        Settings(caption_margin_v=59)
+    with pytest.raises(ValidationError):
+        Settings(caption_words_per_line=9)

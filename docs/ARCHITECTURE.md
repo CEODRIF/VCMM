@@ -231,11 +231,11 @@ Modules and their phases:
 | --- | --- | --- |
 | `app/api` | Health endpoint + worker heartbeat | 1 / 3 (done) |
 | `app/queue` | Job models + Supabase queue client (RPC wrappers incl. `complete_job_rendering` + Phase 4 guarded stage transition / parking) | 1 / 3 / 4 / 5 (done) |
-| `app/processors` | Ingestion (download → FFprobe → ready) + audio extraction + analysis (transcribe → detect → score → persist → park) + **rendering (download → cut/reframe/encode → verify → upload → DB-guarded complete)** | 3 / 4 / 5A (done) |
+| `app/processors` | Ingestion (download → FFprobe → ready) + audio extraction + analysis (transcribe → detect → score + word timings → persist → park) + **rendering (download → cut/reframe/encode → burn subtitles → verify → upload → DB-guarded complete)** | 3 / 4 / 5A / 5B (done) |
 | `app/transcription` | Provider base (word-level contract) + local faster-whisper adapter (optional) + overlap chunking/merge + honest unavailability | 4 (done) |
-| `app/ai` | Sentence extraction, complete-idea window detection, explainable 5-criterion scoring | 4 (done) |
-| `app/rendering` | FFmpeg subprocess lifecycle (timeout/cancel/cleanup), rotation-aware reframe + cut to exact 1080x1920 (subtitles: 5b), FFprobe output-contract validation, render profiles | 5A (done) |
-| `app/storage` | Private Supabase Storage download + clip upload (path-shape validated, size-capped, upsert) + clip persistence (job-scoped) + local path utilities | 3 / 4 / 5 (done) |
+| `app/ai` | Sentence extraction, complete-idea window detection, explainable 5-criterion scoring, per-clip word attachment (5B) | 4 / 5B (done) |
+| `app/rendering` | FFmpeg subprocess lifecycle (timeout/cancel/cleanup), rotation-aware reframe + cut to exact 1080x1920, **deterministic ASS caption engine + libass `ass=` burn-in in the same command (5B)**, FFprobe output-contract validation, render profiles | 5A / 5B (done) |
+| `app/storage` | Private Supabase Storage download + clip upload (path-shape validated, size-capped, upsert) + clip persistence (job-scoped, incl. captions payload) + local path utilities | 3 / 4 / 5 (done) |
 | `app/validation` | FFprobe media validation (container, streams, codecs, duration, size) | 3 (done) |
 | `app/config` | Pydantic settings (env-validated) + JSON structured logging | 1 / 4 / 5 |
 
@@ -315,6 +315,32 @@ abort, cancellation without state writes, temp-dir cleanup on every path,
 one managed FFmpeg subprocess per clip (timeout → kill + await, partial
 output removed).
 
+Captions (Phase 5B): the analysis stage persists each clip's REAL word
+timings into `clips.captions` (`{"words":[{"w","s","e"}]}`, absolute
+seconds, clipped to the window; the detector attaches the transcribed
+tokens itself — nothing is ever invented). The rendering stage converts
+them to clip-relative time, sanitizes them deterministically (missing /
+invalid / overlapping / out-of-range entries are dropped or resolved; a
+corrupt payload degrades to a plain render), and generates an ASS document
+in the per-job temp dir: lines of `caption_words_per_line` words (broken
+earlier by >1.2s silence gaps), per-word karaoke (`\k`) timing — verified
+libass semantics: a word settles into `PrimaryColour` (base, default white)
+as it is spoken while upcoming words glow in `SecondaryColour` (highlight,
+default `00D7FF`) — bottom-center placement in the safe area (MarginV 520,
+PlayRes 1080x1920 = output size, so no rescaling). The `ass=PATH` filter
+(appended AFTER the reframe plan) burns the subtitles into the SAME FFmpeg
+command; the path is filtergraph-escaped and the ASS file is removed on
+every path. Text is escaped so transcribed `{`/`}`/`\` can never open an
+override block; uppercase applies to Latin words only; RTL text is stored
+in logical order (libass/fribidi render the bidi). The job-level
+`captions_enabled` flag (Phase 2 column) gates the feature; when it is off,
+or a clip has no usable words, the command line is byte-for-byte Phase 5A.
+The output contract (MP4/H.264/AAC/1080x1920/yuv420p/zero rotation/
+duration) is unchanged — burn-in alters pixels only. Font rendering is
+delegated to fontconfig (default `DejaVu Sans`, pinned in CI); Arabic
+contextual shaping additionally needs libharfbuzz in the FFmpeg build
+(deterministic fallback: the font's coverage / isolated glyphs).
+
 ## Job state machine
 
 ```
@@ -390,6 +416,12 @@ ACTIVE `rendering` row. States are defined in `src/config/app.ts` (frontend),
   (`clips/{uuid}/{uuid}.mp4` — no traversal), the file exists, is non-empty
   and is under the configured size cap; uploads are upserts (idempotent on
   retry).
+- **Caption safety**: subtitles are generated ONLY from persisted,
+  transcribed words (no synthesis, no fabrication); ASS markup characters
+  in text are escaped (an override block can never be opened from
+  transcribed content), the `ass=` path is filtergraph-escaped, the ASS
+  file exists only in the per-job temp dir and is removed on every path;
+  the font family is validated against markup characters at startup.
 - **Secrets** live in environment variables only; `.env*` is gitignored;
   `.env.example` contains placeholders. Logs are structured JSON and never
   include credentials, signed URLs or raw file names beyond job ids.
@@ -466,11 +498,30 @@ Phase 5A (rendering foundation):
 - `tests/database/phase5-rendering.test.ts` → the full Phase 5 queue
   semantics asserted on a real PostgreSQL engine (pglite WASM).
 
+Phase 5B (animated subtitles):
+
+- `worker/app/rendering/captions.py` → the deterministic ASS engine
+  (timestamp sanitization, line segmentation, `\k` karaoke timing, escaping,
+  persisted-payload parser).
+- `worker/app/rendering/renderer.py` → `ass=` filter appended to the SAME
+  filter chain (temp-dir ASS file, removed on every path).
+- `worker/app/rendering/base.py` → `CaptionWord` / `CaptionStyle` +
+  `RenderSpec.caption_words` / `caption_style` (empty words = Phase 5A).
+- `worker/app/ai/clip_detection.py` + `worker/app/storage/clip_store.py`
+  → `ScoredClip.words` attached from the real tokens, persisted to
+  `clips.captions`, read back for rendering.
+- `worker/app/processors/analysis.py` / `rendering.py` → the wiring
+  (analysis persists words; rendering consumes them per clip, gated by the
+  Phase 2 `jobs.captions_enabled` flag).
+- `supabase/migrations/20261120000000_phase5b_captions.sql` → additive
+  `clips.captions jsonb` (no RLS/RPC changes).
+- `tests/database/phase5b-captions.test.ts` → column, round-trip,
+  idempotency, RLS and no-5A-regression asserted on a real PostgreSQL
+  engine (pglite WASM).
+
 ## Remaining integration points (marked in code)
 
 | Location | Marker | Lands in |
 | --- | --- | --- |
 | `src/lib/jobs/service.ts` | `INTEGRATION POINT (authorized provider only)` | YouTube source materialization by an explicitly approved provider |
-| `src/app/results/page.tsx` | `DEVELOPMENT PLACEHOLDER DATA` | Results API |
-| `worker/app/rendering/renderer.py` | `Phase 5b` (docstring) | Subtitle burn-in from the word-level transcription |
-| `worker/app/processors/pipeline.py` | Phase markers | Phase 5b execution |
+| `src/app/results/page.tsx` | `DEVELOPMENT PLACEHOLDER DATA` | Results API (downloads + clip listing, Phase 6) |

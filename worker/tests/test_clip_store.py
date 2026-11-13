@@ -201,3 +201,32 @@ def test_mark_clip_transport_error_wrapped():
     store = SupabaseClipStore(FakeClient(raise_on_action="update"))
     with pytest.raises(ClipsPersistenceError):
         run(store.mark_clip(JOB, CLIP, "ready"))
+
+
+def test_save_clips_persists_caption_words_payload():
+    from app.ai.clip_detection import TimedToken
+
+    client = FakeClient()
+    store = SupabaseClipStore(client)
+    clips = [
+        ScoredClip(start=60.0, end=120.0, title="Intro", score=88.0, scoring={},
+                   words=(TimedToken(word="hallo", start=60.5, end=61.0),
+                          TimedToken(word="welt", start=61.1, end=61.8))),
+        ScoredClip(start=120.0, end=180.0, title="Hook", score=74.0, scoring={}, words=()),
+    ]
+    run(store.save_clips(JOB, clips))
+    _, insert_rows, _, _, _ = client.calls[1]
+    assert insert_rows[0]["captions"] == {
+        "words": [{"w": "hallo", "s": 60.5, "e": 61.0}, {"w": "welt", "s": 61.1, "e": 61.8}],
+    }
+    assert insert_rows[1]["captions"] is None
+
+
+def test_list_clips_selects_captions_payload():
+    client = FakeClient()
+    store = SupabaseClipStore(client)
+    run(store.list_clips(JOB))
+    action, _payload, filters, select_cols, _order = client.calls[0]
+    assert action == "select"
+    assert "captions" in select_cols
+    assert filters == {"job_id": JOB}

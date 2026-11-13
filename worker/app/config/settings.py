@@ -86,6 +86,26 @@ class Settings(BaseSettings):
     #: rejected (not uploaded).
     max_clip_size_bytes: int = Field(default=200 * 1024 * 1024, gt=0)
 
+    # --- Phase 5B: caption style (burned-in animated subtitles) ----------------
+    #: Font family passed to libass (resolved by fontconfig; deterministic
+    #: fallback = the system default). No ASS markup characters allowed.
+    caption_font_family: str = "DejaVu Sans"
+    #: Glyph size in PlayRes pixels (output is 1080x1920).
+    caption_font_size: int = Field(default=88, ge=24, le=200)
+    #: RRGGBB colors: base = a word as it is spoken (ASS PrimaryColour);
+    #: highlight = upcoming words (ASS SecondaryColour); outline around glyphs.
+    caption_base_color: str = "FFFFFF"
+    caption_highlight_color: str = "00D7FF"
+    caption_outline_color: str = "000000"
+    #: Outline thickness in PlayRes px (readability on any background).
+    caption_outline_width: int = Field(default=6, ge=0, le=24)
+    #: Distance of the caption block from the bottom edge (safe area).
+    caption_margin_v: int = Field(default=520, ge=60, le=1500)
+    #: Consecutive words per on-screen line.
+    caption_words_per_line: int = Field(default=3, ge=1, le=8)
+    #: Uppercase Latin words (Arabic/CJK are never transformed).
+    caption_uppercase: bool = True
+
     @field_validator("transcription_language")
     @classmethod
     def _empty_language_to_none(cls, value: str | None) -> str | None:
@@ -100,6 +120,26 @@ class Settings(BaseSettings):
                 "WORKER_TRANSCRIPTION_OVERLAP_SECONDS must be smaller than WORKER_TRANSCRIPTION_CHUNK_SECONDS"
             )
         return self
+
+    @field_validator("caption_base_color", "caption_highlight_color", "caption_outline_color")
+    @classmethod
+    def _caption_color_sane(cls, value: str) -> str:
+        """RRGGBB hex only — libass ASS colors are built from these."""
+        v = value.strip().upper()
+        if len(v) == 6 and all(c in "0123456789ABCDEF" for c in v):
+            return v
+        raise ValueError("caption colors must be 6-digit RRGGBB hex, e.g. FFD700")
+
+    @field_validator("caption_font_family")
+    @classmethod
+    def _caption_font_sane(cls, value: str) -> str:
+        """Reject ASS markup / filtergraph characters in the font name."""
+        v = value.strip()
+        if not v or len(v) > 64:
+            raise ValueError("caption font family must be 1-64 characters")
+        if any(c in v for c in '{}\\"\'\\;,=[]'):
+            raise ValueError("caption font family must not contain markup characters")
+        return v
 
     @property
     def upload_dir(self) -> Path:
