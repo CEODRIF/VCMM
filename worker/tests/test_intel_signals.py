@@ -56,7 +56,7 @@ def test_event_key_shape():
 
 def test_validation_rejects_bad_events():
     with pytest.raises(ValueError):
-        SignalEvent(t=0.0, t_end=1.0, family="facecam", kind="x", strength=0.5)
+        SignalEvent(t=0.0, t_end=1.0, family="not_a_family", kind="x", strength=0.5)
     with pytest.raises(ValueError):
         SignalEvent(t=1.0, t_end=0.5, family="audio", kind="x", strength=0.5)
     with pytest.raises(ValueError):
@@ -70,6 +70,7 @@ def test_validation_rejects_bad_events():
 def test_signal_families_are_open_but_validated():
     assert "audio" in SIGNAL_FAMILIES
     assert "visual" in SIGNAL_FAMILIES
+    assert "facecam" in SIGNAL_FAMILIES  # TASK 008
 
 
 def test_to_row_carries_evidence_and_defaults():

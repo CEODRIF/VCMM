@@ -295,8 +295,11 @@ design: [`docs/stream-intelligence.md`](stream-intelligence.md).
   transients, sustained voice-activity shifts, silence gaps; visual scene
   cuts (ffmpeg `select='gt(scene,…)'`) and motion bursts (tblend
   difference). A loud sound alone CANNOT qualify (single-family discount;
-  SFX-only transients ×0.2 → never over the bar). Facecam / OCR / HUD are
-  explicit, documented non-goals of this phase (interfaces reserved).
+  SFX-only transients ×0.2 → never over the bar). **Facecam** is
+  implemented in TASK 008 (Phase 8): local MediaPipe detection +
+  measured facial-geometry signals fused as a third family
+  (`docs/stream-intelligence.md` §13). OCR / HUD remain explicit,
+  documented non-goals (interfaces reserved).
 - **Fusion + selection**: weighted independent-family scoring (2 families
   → diversity bonus; confidence = fraction of families), context windows
   (pre 4 s / post 8 s), silence-gap boundary snap (speech-safe), merge +

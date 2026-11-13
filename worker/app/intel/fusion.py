@@ -35,9 +35,16 @@ from .signals import KIND_TRANSIENT, SignalEvent
 DEFAULT_FUSION_WINDOW_SECONDS = 2.5
 DEFAULT_AUDIO_WEIGHT = 0.5
 DEFAULT_VISUAL_WEIGHT = 0.5
+DEFAULT_FACECAM_WEIGHT = 0.5
 DEFAULT_DIVERSITY_BONUS = 0.25
 DEFAULT_SOLO_FACTOR = 0.5
 DEFAULT_SFX_ONLY_SOLO_FACTOR = 0.2
+#: A facecam-ONLY cluster is discounted harder than other solo families:
+#: facial geometry alone is weaker evidence for a highlight than a shout
+#: or a measured cut. At the default min_score (25), a facecam-only event
+#: needs strength ≥ 0.625 to qualify — i.e. LOW-CONFIDENCE facecam-only
+#: observations can never become highlight clips (TASK 008 requirement).
+DEFAULT_FACECAM_ONLY_SOLO_FACTOR = 0.4
 DEFAULT_MIN_SCORE = 25.0
 
 
@@ -46,15 +53,18 @@ class FusionConfig:
     window_seconds: float = DEFAULT_FUSION_WINDOW_SECONDS
     audio_weight: float = DEFAULT_AUDIO_WEIGHT
     visual_weight: float = DEFAULT_VISUAL_WEIGHT
+    facecam_weight: float = DEFAULT_FACECAM_WEIGHT
     diversity_bonus: float = DEFAULT_DIVERSITY_BONUS
     solo_factor: float = DEFAULT_SOLO_FACTOR
     sfx_only_solo_factor: float = DEFAULT_SFX_ONLY_SOLO_FACTOR
+    facecam_only_solo_factor: float = DEFAULT_FACECAM_ONLY_SOLO_FACTOR
     min_score: float = DEFAULT_MIN_SCORE
 
     def __post_init__(self) -> None:
         if self.window_seconds <= 0:
             raise ValueError("window_seconds must be positive")
-        if not (0 < self.audio_weight and 0 < self.visual_weight):
+        if not (0 < self.audio_weight and 0 < self.visual_weight
+                and 0 < self.facecam_weight):
             raise ValueError("family weights must be positive")
         if not 0 <= self.min_score <= 100:
             raise ValueError("min_score must be within [0, 100]")
@@ -103,7 +113,8 @@ def score_cluster(cluster: list[SignalEvent], cfg: FusionConfig) -> tuple[float,
         families.add(e.family)
         strengths[e.family] = max(strengths.get(e.family, 0.0), e.strength)
 
-    weights = {"audio": cfg.audio_weight, "visual": cfg.visual_weight}
+    weights = {"audio": cfg.audio_weight, "visual": cfg.visual_weight,
+               "facecam": cfg.facecam_weight}
     present = [f for f in families if f in weights]
     weight_sum = sum(weights[f] for f in present) or 1.0
     weighted = sum(weights[f] * strengths[f] for f in present) / weight_sum
@@ -116,11 +127,17 @@ def score_cluster(cluster: list[SignalEvent], cfg: FusionConfig) -> tuple[float,
     )
 
     if len(present) >= 2:
+        # Independent families agreeing in time (audio + visual + facecam).
         score = 100.0 * weighted * (1.0 + cfg.diversity_bonus)
         solo = None
     elif sfx_only:
         score = 100.0 * weighted * cfg.sfx_only_solo_factor
         solo = "sfx_only_transient"
+    elif len(present) == 1 and present[0] == "facecam":
+        # Facecam-only: harder discount (facial geometry alone is weaker
+        # evidence; low-confidence facecam can never qualify at min_score).
+        score = 100.0 * weighted * cfg.facecam_only_solo_factor
+        solo = "facecam_only"
     else:
         score = 100.0 * weighted * cfg.solo_factor
         solo = "single_family"

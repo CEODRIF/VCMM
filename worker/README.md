@@ -258,6 +258,14 @@ startup (see `app/config/settings.py`):
  | `WORKER_INTEL_CHUNK_TIMEOUT_SECONDS` | `300` | Per-chunk decode / visual-pass budget; the subprocess is killed after it |
  | `WORKER_INTEL_REQUESTED_CLIPS` | `5` | Default number of ranked candidate clips (1-25) |
  | `WORKER_INTEL_MAX_RESUMES` | `100000` | Resume requeues allowed before a permanent `intel_resume_exhausted` failure (resumes never consume the job's `attempt_count` retry budget) |
+| `WORKER_FACECAM_ENABLED` | `false` | Phase 8 facecam modality. OFF by default; requires the optional extra (`pip install -r requirements-facecam.txt`) AND a detector model path below. Missing model/dependency → honest "unavailable" (recorded, no events, pipeline otherwise unchanged) |
+| `WORKER_FACECAM_SAMPLE_FPS` | `1.0` | Sampled frames per second for face analysis (0 < x ≤ 4) |
+| `WORKER_FACECAM_MIN_CONFIDENCE` | `0.5` | Minimum detector confidence for a face to count (0 < x ≤ 1) |
+| `WORKER_FACECAM_MAX_FACES` | `3` | Max faces considered per frame (1-8); persistence — not size — selects the region |
+| `WORKER_FACECAM_MAX_CONCURRENCY` | `1` | Inference concurrency bound (1-8; 1 = strict sequential, CPU-safe) |
+| `WORKER_FACECAM_DETECTOR_MODEL_PATH` | *(unset)* | EXPLICIT path to `blaze_face_short_range.tflite` (Apache-2.0, ~225 KB, `https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/latest/blaze_face_short_range.tflite`). Weights are NEVER downloaded during job execution |
+| `WORKER_FACECAM_LANDMARKER_MODEL_PATH` | *(unset)* | Optional `face_landmarker.task` (Apache-2.0, ~3.6 MB, `https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task`) — enables facial-geometry metrics (mouth/smile/brow/head); without it only face presence is reported |
+| `WORKER_FACECAM_FRAME_TIMEOUT_SECONDS` | `120` | Wall-clock budget for the per-chunk frame-extraction pass (the subprocess is killed after it) |
 | `WORKER_CAPTION_FONT_FAMILY` | `DejaVu Sans` | libass font family (fontconfig-resolved; no markup characters) |
 | `WORKER_CAPTION_FONT_SIZE` | `88` | Glyph size in PlayRes pixels (24-200) |
 | `WORKER_CAPTION_BASE_COLOR` | `FFFFFF` | Spoken-word color (RRGGBB) — ASS PrimaryColour |

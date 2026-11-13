@@ -38,6 +38,7 @@ from ..ai.clip_detection import NoClipsDetectedError, ScoredClip, TranscriptClip
 from ..config.settings import Settings
 from ..intel.audio_features import AudioFeatureError
 from ..intel.checkpoints import IntelStore, IntelStoreError
+from ..intel.facecam import FacecamConfig, build_facecam_analyzer
 from ..intel.pipeline import PipelineCancelled, PipelineConfig, PipelineError, StreamIntelPipeline
 from ..intel.selection import SelectedClip
 from ..intel.visual_features import VisualFeatureError
@@ -326,6 +327,27 @@ class AnalysisProcessor:
         Cancellation (lease loss / shutdown) performs no state writes; the
         completed chunks stay checkpointed for crash recovery.
         """
+        # TASK 008: facecam modality (optional). Disabled/unconfigured →
+        # None config + Null analyzer → the pipeline is exactly Phase 7.
+        # Enabled → per-job analyzer (model created lazily on the first
+        # chunk; a missing model/dep degrades to an honest unavailable).
+        facecam_config: FacecamConfig | None = None
+        facecam_analyzer = None
+        if self._settings.facecam_enabled and self._settings.facecam_detector_model_path:
+            facecam_config = FacecamConfig(
+                sample_fps=float(self._settings.facecam_sample_fps),
+                min_confidence=float(self._settings.facecam_min_confidence),
+                max_faces=int(self._settings.facecam_max_faces),
+                max_concurrency=int(self._settings.facecam_max_concurrency),
+                detector_model_path=str(self._settings.facecam_detector_model_path),
+                landmarker_model_path=(
+                    str(self._settings.facecam_landmarker_model_path)
+                    if self._settings.facecam_landmarker_model_path else None
+                ),
+                frame_timeout_seconds=float(self._settings.facecam_frame_timeout_seconds),
+            )
+            facecam_analyzer = build_facecam_analyzer(self._settings)
+
         # Per-job pipeline: the chunk/overlap/budget come from the settings
         # (operational limits); the clip cap honours the JOB's request.
         config = PipelineConfig(
@@ -336,8 +358,12 @@ class AnalysisProcessor:
             visual_pass_timeout_seconds=self._settings.intel_chunk_timeout_seconds,
             scene_threshold=self._settings.intel_scene_threshold,
             requested_clips=int(job.get("requested_clips") or self._settings.intel_requested_clips),
+            facecam=facecam_config,
         )
-        pipeline = StreamIntelPipeline(self._settings.ffmpeg_path, self._intel_store, config)
+        pipeline = StreamIntelPipeline(
+            self._settings.ffmpeg_path, self._intel_store, config,
+            facecam_analyzer=facecam_analyzer,
+        )
         try:
             result = await pipeline.run(job_id, destination, info.duration_seconds, tmp_dir)
         except PipelineCancelled:

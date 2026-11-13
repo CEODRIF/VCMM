@@ -17,10 +17,10 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
-#: The two signal families the foundation measures today. The model is
-#: open to more (facecam, gameplay OCR) — they simply never contribute
-#: evidence while their detector is unimplemented.
-SIGNAL_FAMILIES = ("audio", "visual")
+#: The signal families the foundation measures. facecam (TASK 008) is a
+#: real detector (MediaPipe Tasks, CPU); gameplay OCR remains unimplemented
+#: — an unimplemented family simply never contributes evidence.
+SIGNAL_FAMILIES = ("audio", "visual", "facecam")
 
 # audio kinds
 KIND_ENERGY_SPIKE = "energy_spike"          # sudden vocal-energy rise
@@ -29,6 +29,13 @@ KIND_VOICE_ACTIVITY_CHANGE = "voice_activity_change"  # sustained regime shift (
 # visual kinds
 KIND_SCENE_CHANGE = "scene_change"          # measured cut (ffmpeg scene score)
 KIND_MOTION_BURST = "motion_burst"          # frame-difference surge
+# facecam kinds (TASK 008) — measured facial geometry/motion patterns.
+# NOTE: these are observable visual patterns, NEVER emotion/state claims;
+# every event carries the measured values + detector metadata in evidence.
+KIND_FACE_MOUTH_BURST = "face_mouth_burst"          # sudden mouth-opening ratio rise
+KIND_FACE_SMILE_GEOMETRY = "face_smile_geometry"    # sustained smile-like geometry
+KIND_FACE_HEAD_MOTION = "face_head_motion"          # sudden head rotation delta
+KIND_FACE_BROW_ACTIVITY = "face_brow_activity"      # brow/upper-face lift vs median
 
 
 @dataclass(frozen=True)

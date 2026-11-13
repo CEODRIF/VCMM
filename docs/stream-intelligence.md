@@ -162,9 +162,10 @@ Two decimated passes (`fps=2`, null muxer, bounded ranges):
   per-frame YAVG difference → motion bursts.
 
 ### Not implemented (interfaces only, documented)
-- **Facecam presence / expression**: `FacecamSignal` protocol; the
-  `NullFacecamSignal` returns "absent" (the fusion weights simply skip it
-  — a clip WITHOUT facecam can still qualify, per the task).
+- **Facecam presence / expression — IMPLEMENTED in TASK 008 (Phase 8, §13).**
+  The `FacecamSignal`/`NullFacecamSignal` fallback remains: when facecam is
+  disabled/unconfigured the fusion weights simply skip it (a clip WITHOUT
+  facecam still qualifies).
 - **HUD/kill-feed OCR**: `GameplayOcrSignal` protocol, optional, off.
   No game is assumed to expose the same indicators.
 
@@ -378,6 +379,14 @@ explicit, configurable operational limit:
 | `INTEL_MAX_RESUMES` | 100000 | resume cap before a permanent failure |
 | `RENDER_FPS_LOW` | 30 | fallback rate when the source rate is unmeasurable |
 | `RENDER_FPS_HIGH` | 60 | cap for the preserved source rate |
+| `FACECAM_ENABLED` | false | Phase 8 facecam modality master switch (§13; OFF by default) |
+| `FACECAM_SAMPLE_FPS` | 1.0 | facecam frame sampling rate (0 < x ≤ 4) |
+| `FACECAM_MIN_CONFIDENCE` | 0.5 | min detector confidence for a face to count (0 < x ≤ 1) |
+| `FACECAM_MAX_FACES` | 3 | max faces considered per frame (1-8) |
+| `FACECAM_MAX_CONCURRENCY` | 1 | inference concurrency bound (1-8; 1 = strict sequential) |
+| `FACECAM_DETECTOR_MODEL_PATH` | *(unset)* | EXPLICIT detector model file (required to enable) |
+| `FACECAM_LANDMARKER_MODEL_PATH` | *(unset)* | optional landmarker (enables geometry metrics) |
+| `FACECAM_FRAME_TIMEOUT_SECONDS` | 120 | per-chunk frame-extraction wall budget |
 
 Resources: RAM bounded per chunk (audio WAV ≈ 19 MB at 600 s; fusion/
 selection input < 1 MB even for a 24 h VOD); per-chunk temp files deleted
@@ -393,3 +402,88 @@ Operational note: on a database without those tables the worker must run
 WITHOUT the `IntelStore` injection (Phase 4–6 behavior); otherwise intel
 store calls error and analysis jobs fail. Apply the migrations before
 turning on the integrated path in any environment.
+
+## 13. Facecam Intelligence (TASK 008 — Phase 8)
+
+A real, local-first facecam modality for the intel pipeline. **OFF by
+default**; enabling it requires the optional extra + explicit model files.
+When disabled or unavailable the pipeline is exactly Phase 7 — zero
+overhead, zero behavioral change, no fabricated data.
+
+### What it measures (visual patterns only — never emotion/identity)
+- **Facecam presence + region**: faces detected per sampled frame
+  (bbox + confidence, multi-face, NO largest-face assumption). Tracks are
+  linked by bbox IoU; the facecam region is the track with the highest
+  **temporal persistence** (≥ `region_persistence_ratio` of sampled
+  frames) AND **spatial consistency** (mean pairwise IoU ≥
+  `region_min_iou`) AND overlay-scale area (≤ `region_max_area_ratio`) —
+  so a persistent small overlay wins over a large, briefly-present
+  in-game face, and a full-frame webcam is reported as presence, not an
+  "overlay region".
+- **Facial activity (measured geometry, heuristic labels)** on the
+  primary face: mouth-opening ratio vs chunk median (bursts), smile-like
+  geometry score (blendshapes + mouth-width/interocular ratio, sustained
+  runs), brow lift (blendshapes + brow-gap geometry, bursts), head
+  rotation delta between consecutive samples (sudden pose changes), and
+  per-frame visibility/tracking confidence (scales event strength).
+  Every event's evidence states it is a visual pattern, **NOT** an
+  emotion, state, or identity classification.
+
+### Implementation (`worker/app/intel/facecam/`)
+- `frames.py` — bounded FFmpeg extraction per chunk window: `-ss/-t` +
+  `fps=<sample_fps>` + `-frames:v <cap>` → JPEG grid on disk (default
+  1 fps; 1200-frame hard cap; wall-clock timeout + kill). Only sampled
+  frames are ever decoded — never the whole VOD.
+- `model.py` — MediaPipe **Tasks API** (CPU delegate by policy;
+  per-job instance, no cross-job native state; model init ≈ 35 ms).
+  `blaze_face_short_range.tflite` (229,746 B) detects;
+  `face_landmarker.task` (3,758,596 B) provides 478 landmarks + 52
+  blendshapes + the 4×4 facial transformation matrix (pose delta from
+  convention-independent rotation comparison).
+- `geometry.py` — pure-numpy measures (mediapipe-free, unit-testable).
+- `region.py` / `signals.py` — track linking + region selection;
+  `detect_facecam_events` → `SignalEvent`s (family `facecam`) with
+  ABSOLUTE timestamps (chunk offset applied exactly once), measured
+  evidence + detector metadata, and the same 0.1 s `event_key` bucketing
+  — so checkpoint/dedup/midpoint-ownership semantics from §2/§4 apply
+  UNCHANGED (an event in the overlap is persisted exactly once).
+- `__init__.py` — `FacecamAnalyzer` interface + `NullFacecamAnalyzer`
+  (kept as the honest fallback) + `MediaPipeFacecamAnalyzer`. **Honest
+  unavailability at every boundary**: disabled / no model path /
+  unreadable model / missing dependency → sticky `unavailable` (no retry
+  storm), recorded per chunk in the checkpoint summary
+  (`features.facecam`, nested — no schema change, NO migration) and in
+  `PipelineResult.facecam`. Frame-extraction failure → per-chunk
+  unavailable; audio/visual events still persist.
+- **Integration**: `PipelineConfig.facecam` (None = disabled); the
+  analyzer is owned by the pipeline and `close()`d on EVERY exit path
+  (complete / incomplete / cancelled / error); cancellation maps
+  `FacecamCancelled` → `PipelineCancelled` (no state written);
+  `analysis.py` builds it only when `FACECAM_ENABLED` + detector path are
+  set. Fusion: `facecam_weight` 0.5 with a solo factor of 0.4 — a
+  facecam-only low-confidence observation can NEVER qualify alone.
+  Selection categories for facecam evidence are labeled heuristic.
+
+### Model + dependency policy
+- Weights: official MediaPipe model files, **Apache-2.0** (model card:
+  identity recognition explicitly out of scope). Explicitly configured
+  via settings and validated at first use — **never downloaded during
+  job execution**. No cloud API, no paid service, CPU-only.
+- `mediapipe==1.2.3` lives in `worker/requirements-facecam.txt` — NOT in
+  the base install (no silent large dependency).
+- Runtime note: the mediapipe CPU inference path links EGL/GLES shared
+  libraries (mesa on Linux); where those are absent the modality
+  degrades to honest `unavailable` instead of crashing.
+
+### Tests (`worker/tests/test_facecam.py`, 50)
+Synthetic fixtures only (AI-generated face images, no real people, no
+accuracy claims): region persistence vs in-game false positives vs
+multi-face vs occlusion vs full-frame; signals (burst/smile/brow/head,
+absolute timestamps, evidence, key stability, confidence scaling,
+detector-only mode fabricates nothing); frames (bounded grid, caps,
+timeouts, honest errors); missing model / missing dependency → honest
+unavailable; pipeline-level (disabled = Phase 7 unchanged;
+persist/resume/dedup across the overlap; unavailable recorded honestly;
+cancellation writes nothing + cleans frames); and 5 **real-model**
+smoke tests that skip cleanly when the extra/models are absent
+(CI runs them in a best-effort step).
