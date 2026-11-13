@@ -2,7 +2,9 @@ import "server-only";
 
 import { NextResponse } from "next/server";
 
+import { securityConfig } from "@/config/security";
 import { requireSession } from "@/lib/api/auth";
+import { BodyTooLargeError, readJsonBody } from "@/lib/api/body";
 import { ApiError, toErrorResponse } from "@/lib/api/errors";
 import { findJobForSession, markUploadComplete, type JobRow } from "@/lib/db/jobs";
 import { verifySourceObject } from "@/lib/storage/objects";
@@ -71,8 +73,11 @@ export async function POST(request: Request, context: { params: { jobId: string 
 
     let body: unknown;
     try {
-      body = await request.json();
-    } catch {
+      body = await readJsonBody(request, securityConfig.bodyLimit.maxBytes);
+    } catch (err) {
+      if (err instanceof BodyTooLargeError) {
+        throw new ApiError(413, "Request payload is too large.");
+      }
       throw new ApiError(400, "Invalid JSON payload.");
     }
     const parsed = completeSchema.safeParse(body);

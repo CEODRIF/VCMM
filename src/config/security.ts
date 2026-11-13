@@ -18,4 +18,23 @@ export const securityConfig = {
     windowMs: 15 * 60 * 1000,
     maxAttempts: 5,
   },
+  /**
+   * Rate limiting for job CREATION (per session, not per IP — the session
+   * token is unforgeable client-side, so it cannot be bypassed by IP
+   * rotation; 10 jobs/minute is far above legitimate use and far below the
+   * cost of a flood against the queue + worker pool).
+   */
+  jobCreationRateLimit: {
+    windowMs: 60 * 1000,
+    maxAttempts: 10,
+  },
+  /**
+   * Maximum JSON request-body size in bytes for the small POST endpoints
+   * (job creation, access code, upload authorize/complete). A legitimate
+   * payload is a few hundred bytes; the cap exists to bound memory use,
+   * not to constrain features.
+   */
+  bodyLimit: {
+    maxBytes: 16 * 1024,
+  },
 } as const;

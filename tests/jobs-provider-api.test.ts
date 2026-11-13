@@ -46,6 +46,7 @@ vi.mock("@/lib/providers/twitch", () => ({
 import { POST as POST_JOBS } from "@/app/api/v1/jobs/route";
 import { findSessionByTokenHash } from "@/lib/db/sessions";
 import { insertJob } from "@/lib/db/jobs";
+import { jobCreationRateLimiter } from "@/lib/security/rate-limit";
 import { validateTwitchUrl } from "@/lib/validation/clips";
 
 const findSessionMock = findSessionByTokenHash as ReturnType<typeof vi.fn>;
@@ -79,6 +80,9 @@ const clipFields = { clipCount: 3, clipDurationSeconds: 120, captionsEnabled: tr
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // TASK 012: the route now rate-limits job creation per session — reset the
+  // shared limiter so each test starts with a clean window (deterministic).
+  jobCreationRateLimiter.resetAll();
   findSessionMock.mockResolvedValue({ id: SESSION_ID, expires_at: FUTURE });
   insertMock.mockResolvedValue({ id: JOB_ID });
   // honest defaults: nothing configured on this deployment

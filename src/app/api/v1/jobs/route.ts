@@ -2,12 +2,15 @@ import "server-only";
 
 import { NextResponse } from "next/server";
 
+import { securityConfig } from "@/config/security";
 import { requireSession } from "@/lib/api/auth";
+import { BodyTooLargeError, readJsonBody } from "@/lib/api/body";
 import { toErrorResponse } from "@/lib/api/errors";
 import type { JobRow } from "@/lib/db/jobs";
 import { listJobsForSession } from "@/lib/db/jobs";
 import { createJob } from "@/lib/jobs/service";
 import { validateCreateJobPayload } from "@/lib/jobs/validate";
+import { jobCreationRateLimiter } from "@/lib/security/rate-limit";
 
 /**
  * Job API (session-scoped).
@@ -43,12 +46,29 @@ export async function POST(request: Request) {
   try {
     const session = await requireSession(request);
 
+    // TASK 012: bounded body read — an oversized payload fails with a typed
+    // 413 instead of being buffered in memory.
     let body: unknown;
     try {
-      body = await request.json();
-    } catch {
+      body = await readJsonBody(request, securityConfig.bodyLimit.maxBytes);
+    } catch (err) {
+      if (err instanceof BodyTooLargeError) {
+        return NextResponse.json({ error: "Request payload is too large." }, { status: 413 });
+      }
       return NextResponse.json({ error: "Invalid JSON payload." }, { status: 400 });
     }
+
+    // TASK 012: per-session job-creation rate limit (unforgeable key).
+    const limit = jobCreationRateLimiter.check(`job-create:${session.sessionId}`);
+    if (limit.limited) {
+      const res = NextResponse.json(
+        { error: "Too many job creations. Please try again shortly." },
+        { status: 429 }
+      );
+      res.headers.set("Retry-After", String(Math.max(1, Math.ceil(limit.retryAfterMs / 1000))));
+      return res;
+    }
+
     const validation = validateCreateJobPayload(body);
     if (!validation.success) {
       return NextResponse.json({ error: validation.error }, { status: 400 });

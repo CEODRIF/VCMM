@@ -3,7 +3,9 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 
+import { securityConfig } from "@/config/security";
 import { requireSession } from "@/lib/api/auth";
+import { BodyTooLargeError, readJsonBody } from "@/lib/api/body";
 import { ApiError, toErrorResponse } from "@/lib/api/errors";
 import { findJobForSession, setUploadAuthorization } from "@/lib/db/jobs";
 import { uploadConfig } from "@/config/uploads";
@@ -73,8 +75,11 @@ export async function POST(request: Request, context: { params: { jobId: string 
 
     let body: unknown;
     try {
-      body = await request.json();
-    } catch {
+      body = await readJsonBody(request, securityConfig.bodyLimit.maxBytes);
+    } catch (err) {
+      if (err instanceof BodyTooLargeError) {
+        throw new ApiError(413, "Request payload is too large.");
+      }
       throw new ApiError(400, "Invalid JSON payload.");
     }
     const parsed = authorizeSchema.safeParse(body);

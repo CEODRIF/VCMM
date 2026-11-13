@@ -20,6 +20,7 @@ import { GET as GET_JOB } from "@/app/api/v1/jobs/[jobId]/route";
 import { findSessionByTokenHash } from "@/lib/db/sessions";
 import { countClipsForJob, findJobForSession, insertJob, listJobsForSession } from "@/lib/db/jobs";
 import { sha256Hex } from "@/lib/security/crypto";
+import { jobCreationRateLimiter } from "@/lib/security/rate-limit";
 
 const findSessionMock = findSessionByTokenHash as ReturnType<typeof vi.fn>;
 const insertMock = insertJob as ReturnType<typeof vi.fn>;
@@ -45,6 +46,9 @@ function requestWithSession(method: "GET" | "POST", path: string, body?: unknown
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // TASK 012: job creation is rate-limited per session — reset the shared
+  // limiter so each test starts with a clean window (deterministic).
+  jobCreationRateLimiter.resetAll();
   findSessionMock.mockResolvedValue({ id: SESSION_ID, expires_at: FUTURE });
   insertMock.mockResolvedValue({ id: JOB_ID });
   findJobMock.mockResolvedValue(null);
