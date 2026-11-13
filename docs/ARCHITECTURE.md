@@ -226,15 +226,15 @@ Modules and their phases:
 
 | Module | Responsibility | Phase |
 | --- | --- | --- |
-| `app/api` | Health endpoint + ingestion heartbeat | 1 / 3 (done) |
-| `app/queue` | Job models + Supabase queue client (RPC wrappers) | 1 / 3 (done) |
-| `app/processors` | Ingestion processor (download → FFprobe → ready); pipeline stage order for 4-5 | 3 (done) |
-| `app/transcription` | Whisper transcription of the audio track | 4 |
-| `app/ai` | Clip detection/scoring from the transcription | 4 |
+| `app/api` | Health endpoint + worker heartbeat | 1 / 3 (done) |
+| `app/queue` | Job models + Supabase queue client (RPC wrappers + Phase 4 guarded stage transition / parking) | 1 / 3 / 4 (done) |
+| `app/processors` | Ingestion processor (download → FFprobe → ready) + audio extraction + analysis processor (transcribe → detect → score → persist → park) | 3 / 4 (done) |
+| `app/transcription` | Provider base (word-level contract) + local faster-whisper adapter (optional) + overlap chunking/merge + honest unavailability | 4 (done) |
+| `app/ai` | Sentence extraction, complete-idea window detection, explainable 5-criterion scoring | 4 (done) |
 | `app/rendering` | FFmpeg: reframe to 9:16, cut, animated subtitles, encode 1080x1920 | 5 |
-| `app/storage` | Private Supabase Storage download (path-validated, size-capped streaming) + local path utilities | 3 (done) |
+| `app/storage` | Private Supabase Storage download (path-validated, size-capped streaming) + clip persistence (job-scoped) + local path utilities | 3 / 4 (done) |
 | `app/validation` | FFprobe media validation (container, streams, codecs, duration, size) | 3 (done) |
-| `app/config` | Pydantic settings (env-validated) + JSON structured logging | 1 |
+| `app/config` | Pydantic settings (env-validated) + JSON structured logging | 1 / 4 |
 
 Ingestion loop (Phase 3): poll → `claim_next_job` (atomic) → bounded-
 concurrency processing (semaphore) → download to temp → FFprobe validate →
@@ -248,9 +248,38 @@ clean temp files. `/health` exposes a worker heartbeat (id, active jobs,
 uptime).
 
 The worker reports state transitions and progress through the RPCs; the UI
-polls the API. The worker NEVER marks a job `completed` during ingestion —
-ingestion ends at `ready`; `completed` is reserved for the finished product
-pipeline (Phases 4-5).
+polls the API. The worker NEVER marks a job `completed` — `completed` is
+reserved for the finished rendering pipeline (Phase 5+).
+
+Analysis lifecycle (Phase 4): the claim RPC is stage-aware — a `ready` job is
+claimed directly as `transcribing` (a `queued` job as `validating`; an active
+job with an EXPIRED lease is recovered in place, crash recovery for every
+active stage). The worker dispatches by the claimed stage: `validating` →
+ingestion processor, `transcribing`/`analyzing` → analysis processor, which
+runs: re-download the verified source → re-probe (require an audio stream,
+else permanent `no_audio`) → FFmpeg audio extraction (mono 16 kHz WAV) →
+local Whisper transcription (chunked for long recordings, word-level
+timestamps) → guarded `transcribing → analyzing` transition → complete-idea
+clip detection within `[max(60, 0.85·target), min(180, 1.25·target)]` with
+<50% pairwise overlap → explainable 5-criterion scoring → job-scoped
+delete-then-insert into `clips` → **park** (lock cleared, progress 100,
+status stays `analyzing`). A parked job is NOT claimable; the Phase 5
+renderer will extend the claim to parked jobs and move them to `rendering`.
+Every step keeps the Phase 3 safety contract: per-job lease renewal with
+ownership-loss abort (no stale writes), cancellation without state writes,
+temp-dir cleanup on every path, bounded retries with stage-aware requeue
+(a transient analysis failure returns to `ready`, never `queued`), and safe,
+categorized errors (`no_audio`, `transcription_unavailable`, `no_speech`,
+`no_clips_detected` are permanent; download/extract/transcribe/persist
+errors are transient).
+
+Transcription is provider-based and honest by construction: the
+`BaseTranscriber` contract carries word/segment timings, language and
+metadata. The only shipped engine is **local** faster-whisper (optional
+dependency, CPU, no cloud/credentials); when it is absent or unconfigured
+the factory returns an `UnavailableTranscriber` whose calls raise
+`TranscriptionUnavailableError` — jobs fail permanently with a clear message
+instead of producing fabricated output.
 
 ## Job state machine
 
@@ -260,11 +289,16 @@ ingestion (Phase 3):   uploading → queued → validating → ready
 
 product pipeline:      ready → transcribing → analyzing → rendering → completed
                        (any active) ─────────────────────────────────► failed
+                       (Phase 4 end state: PARKED analyzing = lock cleared,
+                        not claimable; Phase 5 claims it → rendering)
 ```
 
 Legal transitions are enforced by the database trigger
 (`validate_job_status_transition`), so no API or worker bug can move a job to
-an arbitrary state. States are defined in `src/config/app.ts` (frontend),
+an arbitrary state. Phase 4 extends the map with `transcribing → ready`
+(transient analysis retry) and `analyzing → ready` (graceful release), and the
+lock-consistency constraint admits a parked `analyzing` row (lock cleared).
+States are defined in `src/config/app.ts` (frontend),
 `worker/app/queue/models.py` (worker) and the `jobs_status_check` constraint
 (Postgres) and kept in sync by tests on both sides.
 
@@ -331,7 +365,8 @@ Phase 3 (ingestion):
   configured.
 - `src/components/processing/*` → nine-state rendering (uploading, queued,
   validating, ready, transcribing, analyzing, rendering, completed, failed);
-  polling stops at `ready` (terminal for ingestion).
+  polling stops at a final state or when the job is parked at `analyzing`
+  with detected clips (`clipsCount > 0`).
 - `src/lib/storage/objects.ts` → signed upload URL creation + object
   verification (private bucket, service role).
 - `src/lib/providers/youtube.ts` → authorized-provider interface; the
@@ -342,10 +377,26 @@ Phase 3 (ingestion):
   `app/validation/media.py` → the ingestion loop (see above), started via
   FastAPI lifespan.
 
+Phase 4 (AI processing engine):
+
+- `src/app/api/v1/jobs/[jobId]/route.ts` → job status now includes
+  `clipsCount` (detected-clip count; 0 until analysis persists clips).
+- `worker/app/processors/analysis.py` + `app/processors/audio.py` +
+  `app/transcription/*` + `app/ai/*` + `app/storage/clip_store.py` → the
+  analysis lifecycle (see above), dispatched by the stage-aware claim
+  (`ready → transcribing`), parked at `analyzing`.
+- `worker/app/queue/supabase_queue.py` → guarded direct updates
+  (`transition_stage`, `park_after_analysis`) scoped to
+  `(id, status, locked_by = caller)`; the DB trigger remains the authority.
+- `supabase/migrations/20261116000000_phase4_clip_analysis.sql` → clip
+  score/scoring columns, stage-aware queue RPCs, transition map extension,
+  parked-`analyzing` lock-consistency branch.
+
 ## Remaining integration points (marked in code)
 
 | Location | Marker | Lands in |
 | --- | --- | --- |
 | `src/lib/jobs/service.ts` | `INTEGRATION POINT (authorized provider only)` | YouTube source materialization by an explicitly approved provider |
 | `src/app/results/page.tsx` | `DEVELOPMENT PLACEHOLDER DATA` | Results API |
-| `worker/app/processors/pipeline.py` | Phase markers | Phases 4-5 execution |
+| `worker/app/processors/analysis.py` | `INTEGRATION POINT (Phase 5 rendering)` | Renderer claims parked `analyzing` jobs → `rendering`; clip files → `clipforge-clips` |
+| `worker/app/processors/pipeline.py` | Phase markers | Phase 5 execution |
