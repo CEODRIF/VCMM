@@ -45,6 +45,15 @@ DEFAULT_SFX_ONLY_SOLO_FACTOR = 0.2
 #: needs strength ≥ 0.625 to qualify — i.e. LOW-CONFIDENCE facecam-only
 #: observations can never become highlight clips (TASK 008 requirement).
 DEFAULT_FACECAM_ONLY_SOLO_FACTOR = 0.4
+#: A game-vision-ONLY cluster is discounted the same way as facecam-only:
+#: OCR text alone is single-source evidence (the OCR could misread), so
+#: LOW-CONFIDENCE game-vision-only observations can never qualify at the
+#: default min_score (25): strength must be >= 0.625. Strong,
+#: high-confidence reads (a clearly OCR'd kill-feed line) can, which is
+#: intentional — an observed in-game event is real highlight material
+#: even without a vocal reaction.
+DEFAULT_GAME_VISION_WEIGHT = 0.5
+DEFAULT_GAME_VISION_ONLY_SOLO_FACTOR = 0.4
 DEFAULT_MIN_SCORE = 25.0
 
 
@@ -54,17 +63,19 @@ class FusionConfig:
     audio_weight: float = DEFAULT_AUDIO_WEIGHT
     visual_weight: float = DEFAULT_VISUAL_WEIGHT
     facecam_weight: float = DEFAULT_FACECAM_WEIGHT
+    game_vision_weight: float = DEFAULT_GAME_VISION_WEIGHT
     diversity_bonus: float = DEFAULT_DIVERSITY_BONUS
     solo_factor: float = DEFAULT_SOLO_FACTOR
     sfx_only_solo_factor: float = DEFAULT_SFX_ONLY_SOLO_FACTOR
     facecam_only_solo_factor: float = DEFAULT_FACECAM_ONLY_SOLO_FACTOR
+    game_vision_only_solo_factor: float = DEFAULT_GAME_VISION_ONLY_SOLO_FACTOR
     min_score: float = DEFAULT_MIN_SCORE
 
     def __post_init__(self) -> None:
         if self.window_seconds <= 0:
             raise ValueError("window_seconds must be positive")
         if not (0 < self.audio_weight and 0 < self.visual_weight
-                and 0 < self.facecam_weight):
+                and 0 < self.facecam_weight and 0 < self.game_vision_weight):
             raise ValueError("family weights must be positive")
         if not 0 <= self.min_score <= 100:
             raise ValueError("min_score must be within [0, 100]")
@@ -114,7 +125,8 @@ def score_cluster(cluster: list[SignalEvent], cfg: FusionConfig) -> tuple[float,
         strengths[e.family] = max(strengths.get(e.family, 0.0), e.strength)
 
     weights = {"audio": cfg.audio_weight, "visual": cfg.visual_weight,
-               "facecam": cfg.facecam_weight}
+               "facecam": cfg.facecam_weight,
+               "game_vision": cfg.game_vision_weight}
     present = [f for f in families if f in weights]
     weight_sum = sum(weights[f] for f in present) or 1.0
     weighted = sum(weights[f] * strengths[f] for f in present) / weight_sum
@@ -138,6 +150,12 @@ def score_cluster(cluster: list[SignalEvent], cfg: FusionConfig) -> tuple[float,
         # evidence; low-confidence facecam can never qualify at min_score).
         score = 100.0 * weighted * cfg.facecam_only_solo_factor
         solo = "facecam_only"
+    elif len(present) == 1 and present[0] == "game_vision":
+        # Game-vision-only: same conservative discount as facecam —
+        # single-source OCR can misread; low-confidence reads never
+        # qualify alone (TASK 009).
+        score = 100.0 * weighted * cfg.game_vision_only_solo_factor
+        solo = "game_vision_only"
     else:
         score = 100.0 * weighted * cfg.solo_factor
         solo = "single_family"

@@ -33,6 +33,10 @@ from .signals import (
     KIND_FACE_HEAD_MOTION,
     KIND_FACE_MOUTH_BURST,
     KIND_FACE_SMILE_GEOMETRY,
+    KIND_GF_KILL_FEED_ENTRY,
+    KIND_GF_MATCH_RESULT_TEXT,
+    KIND_GF_SCORE_CHANGE,
+    KIND_GF_SCOREBOARD_APPEARANCE,
     KIND_MOTION_BURST,
     KIND_SCENE_CHANGE,
     KIND_TRANSIENT,
@@ -139,6 +143,12 @@ def _categorize(window: CandidateWindow) -> tuple[str, str]:
     has_scene = KIND_SCENE_CHANGE in kinds
     has_smile = KIND_FACE_SMILE_GEOMETRY in kinds
     has_mouth_burst = KIND_FACE_MOUTH_BURST in kinds
+    has_kill_feed = KIND_GF_KILL_FEED_ENTRY in kinds
+    has_match_result = KIND_GF_MATCH_RESULT_TEXT in kinds
+    has_score_change = KIND_GF_SCORE_CHANGE in kinds
+    has_scoreboard = KIND_GF_SCOREBOARD_APPEARANCE in kinds
+    game_ev = ({KIND_GF_KILL_FEED_ENTRY, KIND_GF_MATCH_RESULT_TEXT,
+                KIND_GF_SCORE_CHANGE, KIND_GF_SCOREBOARD_APPEARANCE} & kinds)
 
     if vocal and has_smile:
         return (CATEGORY_FUNNY,
@@ -152,6 +162,44 @@ def _categorize(window: CandidateWindow) -> tuple[str, str]:
         return CATEGORY_CRAZY_REACTION, "sustained vocal spike co-occurring with a transient burst"
     if vocal and has_scene:
         return CATEGORY_CRAZY_REACTION, "vocal spike around a measured cut"
+    # -- game vision (TASK 009): OCR-observed in-game events --------------
+    # The TEXT/VALUES were directly observed by OCR; the category is a
+    # heuristic interpretation of that observed content (always labeled).
+    if vocal and has_kill_feed:
+        return (CATEGORY_EPIC_KILL,
+                "vocal spike co-occurring with an OCR-observed kill-feed entry "
+                "(heuristic interpretation of observed text)")
+    if has_match_result:
+        text = next((str(e.evidence.get("text", "")).casefold()
+                     for e in window.events if e.kind == KIND_GF_MATCH_RESULT_TEXT), "")
+        if text in {"victory", "win", "gg", "gg wp"}:
+            return (CATEGORY_VICTORY,
+                    "OCR-observed match-result text (win/victory/gg) — observed text, "
+                    "heuristic interpretation")
+        if text in {"defeat", "loss", "surrender", "forfeit", "game over"}:
+            return (CATEGORY_FAILURE,
+                    "OCR-observed match-result text (defeat/loss) — observed text, "
+                    "heuristic interpretation")
+        return (CATEGORY_UNEXPECTED,
+                "OCR-observed match-result text (heuristic interpretation)")
+    if has_kill_feed and has_scene:
+        return (CATEGORY_EPIC_KILL,
+                "OCR-observed kill-feed entry co-occurring with a measured cut "
+                "(heuristic interpretation of observed text)")
+    if has_kill_feed:
+        if len(families) >= 2:
+            return (CATEGORY_EPIC_KILL,
+                    "OCR-observed kill-feed entry with corroborating evidence "
+                    "(heuristic interpretation)")
+        return (CATEGORY_UNEXPECTED,
+                "OCR-observed kill-feed entry (heuristic interpretation of observed "
+                "text; single family)")
+    if has_score_change:
+        return CATEGORY_UNCLASSIFIED, "OCR-observed score change (measured values; no confident category)"
+    if has_scoreboard:
+        return CATEGORY_UNCLASSIFIED, "scoreboard appearance (text-density heuristic)"
+    if game_ev:
+        return CATEGORY_UNCLASSIFIED, "game vision evidence (heuristic interpretation)"
     if vocal:
         return CATEGORY_CRAZY_REACTION, "strong vocal-family evidence (heuristic)"
     if sfx and has_scene:

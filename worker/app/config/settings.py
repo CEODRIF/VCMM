@@ -170,10 +170,50 @@ class Settings(BaseSettings):
     #: Wall-clock budget for the per-chunk FFmpeg frame-extraction pass.
     facecam_frame_timeout_seconds: float = Field(default=120.0, gt=0, le=3600)
 
+    # -- TASK 009: game vision intelligence (OPTIONAL modality) ------------
+    #: Master switch. OFF by default — enabling it requires the system
+    #: tesseract-ocr package (see worker/README.md) and, for best results,
+    #: the optional Pillow extra. A missing binary/tessdata degrades to an
+    #: honest ``unavailable`` result (recorded, no events), never to
+    #: fabricated data.
+    game_vision_enabled: bool = False
+    #: Sampled frames per second of source for OCR analysis (bounded decode).
+    game_vision_sample_fps: float = Field(default=1.0, gt=0, le=4)
+    #: Minimum tesseract line confidence (0-100) for a text line to count.
+    game_vision_min_ocr_confidence: float = Field(default=60.0, ge=0, le=100)
+    #: Hard cap on sampled frames per chunk (bounded disk + OCR cost).
+    game_vision_max_frames_per_chunk: int = Field(default=1200, ge=2, le=5000)
+    #: Hard cap on OCR subprocess runs per chunk.
+    game_vision_max_ocr_operations_per_chunk: int = Field(default=800, ge=2, le=5000)
+    #: Wall-clock budget for the whole per-chunk game-vision pass.
+    game_vision_max_chunk_seconds: float = Field(default=240.0, gt=0, le=3600)
+    #: Wall-clock budget for the per-chunk FFmpeg frame-extraction pass.
+    game_vision_frame_timeout_seconds: float = Field(default=120.0, gt=0, le=3600)
+    #: Wall-clock budget for ONE OCR subprocess (killed after it).
+    game_vision_ocr_timeout_seconds: float = Field(default=30.0, gt=0, le=600)
+    #: Tesseract language code (the matching language pack must be
+    #: installed explicitly — never downloaded at runtime).
+    game_vision_ocr_language: str = "eng"
+    #: EXPLICIT tessdata directory containing <language>.traineddata;
+    #: None = trust the system default location.
+    game_vision_tessdata_dir: str | None = None
+    #: EXPLICIT tesseract binary path; None = resolve from PATH.
+    game_vision_tesseract_binary: str | None = None
+    #: Kill-feed region of interest as 'x,y,w,h' normalized values
+    #: (default top-right strip; None/empty = full frame, slower but
+    #: layout-agnostic).
+    game_vision_kill_feed_roi: str | None = "0.80,0.02,0.18,0.12"
+
     @field_validator("transcription_language")
     @classmethod
     def _empty_language_to_none(cls, value: str | None) -> str | None:
         """An empty env var means 'auto-detect', not the literal ''."""
+        return value or None
+
+    @field_validator("game_vision_kill_feed_roi")
+    @classmethod
+    def _empty_roi_to_none(cls, value: str | None) -> str | None:
+        """An empty env var means 'full frame', not the literal ''."""
         return value or None
 
     @model_validator(mode="after")
@@ -189,6 +229,27 @@ class Settings(BaseSettings):
             )
         if self.render_fps_low > self.render_fps_high:
             raise ValueError("WORKER_RENDER_FPS_LOW must be <= WORKER_RENDER_FPS_HIGH")
+        if self.game_vision_kill_feed_roi:
+            # Fail fast at startup (same convention as the other bounds):
+            # the ROI must be 'x,y,w,h' with normalized values in [0, 1].
+            parts = [p.strip() for p in self.game_vision_kill_feed_roi.split(",")]
+            if len(parts) != 4:
+                raise ValueError(
+                    "WORKER_GAME_VISION_KILL_FEED_ROI must be 'x,y,w,h' "
+                    "(normalized values in [0, 1])")
+            try:
+                values = [float(p) for p in parts]
+            except ValueError as exc:
+                raise ValueError(
+                    "WORKER_GAME_VISION_KILL_FEED_ROI must be 'x,y,w,h' "
+                    "(normalized values in [0, 1])") from exc
+            if not all(0 <= v <= 1 for v in values) or values[2] <= 0 or values[3] <= 0:
+                raise ValueError(
+                    "WORKER_GAME_VISION_KILL_FEED_ROI values must be in [0, 1] "
+                    "with positive width/height")
+            if values[0] + values[2] > 1 + 1e-9 or values[1] + values[3] > 1 + 1e-9:
+                raise ValueError(
+                    "WORKER_GAME_VISION_KILL_FEED_ROI must lie within the frame")
         return self
 
     @field_validator("caption_base_color", "caption_highlight_color", "caption_outline_color")

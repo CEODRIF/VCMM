@@ -95,3 +95,17 @@ jobs:
           curl -fsSL -o .facecam-models/face_landmarker.task \
             "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task"
           FACECAM_TEST_MODELS_DIR=.facecam-models python -m pytest tests/test_facecam.py -v -k real_model
+
+      - name: Game vision real-OCR tests (optional extra, best-effort)
+        # TASK 009: game-vision tests that need the OPTIONAL dependencies
+        # (system tesseract-ocr + Pillow) run here, best-effort. The main
+        # worker suite above already ran WITHOUT them and skips these
+        # tests cleanly, so an apt/pip hiccup does not fail the PR. The
+        # tesseract engine is the public, permissively licensed system
+        # package (Apache-2.0) — no cloud OCR, no paid service, CPU-only.
+        continue-on-error: true
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tesseract-ocr tesseract-ocr-eng
+          pip install -r requirements-game-vision.txt
+          python -m pytest tests/test_game_vision.py -v -k "real_ocr or frame_change or roi_crops or max_dim"
