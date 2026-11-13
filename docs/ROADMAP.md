@@ -298,8 +298,11 @@ design: [`docs/stream-intelligence.md`](stream-intelligence.md).
   SFX-only transients ×0.2 → never over the bar). **Facecam** is
   implemented in TASK 008 (Phase 8): local MediaPipe detection +
   measured facial-geometry signals fused as a third family
-  (`docs/stream-intelligence.md` §13). OCR / HUD remain explicit,
-  documented non-goals (interfaces reserved).
+  (`docs/stream-intelligence.md` §13). **Game OCR / HUD / kill-feed /
+  scoreboard** is implemented in TASK 009 (Phase 8) as the game-vision
+  modality: local tesseract OCR of configurable regions, conservative
+  gameplay candidates fused as a fourth family (§14) — game-specific
+  indicator layouts remain configuration, not code.
 - **Fusion + selection**: weighted independent-family scoring (2 families
   → diversity bonus; confidence = fraction of families), context windows
   (pre 4 s / post 8 s), silence-gap boundary snap (speech-safe), merge +

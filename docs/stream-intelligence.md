@@ -166,8 +166,10 @@ Two decimated passes (`fps=2`, null muxer, bounded ranges):
   The `FacecamSignal`/`NullFacecamSignal` fallback remains: when facecam is
   disabled/unconfigured the fusion weights simply skip it (a clip WITHOUT
   facecam still qualifies).
-- **HUD/kill-feed OCR**: `GameplayOcrSignal` protocol, optional, off.
-  No game is assumed to expose the same indicators.
+- **HUD/kill-feed OCR — IMPLEMENTED in TASK 009 (Phase 8, §14)** as the
+  game-vision modality (local tesseract OCR of configurable regions;
+  no game is assumed to expose the same indicators — regions are
+  configuration, not code).
 
 ### Detectors (`intel/detectors.py`) — pure functions over features
 Each emits `SignalEvent(t, family, kind, strength 0..1, evidence)`:
@@ -387,6 +389,18 @@ explicit, configurable operational limit:
 | `FACECAM_DETECTOR_MODEL_PATH` | *(unset)* | EXPLICIT detector model file (required to enable) |
 | `FACECAM_LANDMARKER_MODEL_PATH` | *(unset)* | optional landmarker (enables geometry metrics) |
 | `FACECAM_FRAME_TIMEOUT_SECONDS` | 120 | per-chunk frame-extraction wall budget |
+| `GAME_VISION_ENABLED` | false | Phase 8 game-vision modality master switch (§14; OFF by default) |
+| `GAME_VISION_SAMPLE_FPS` | 1.0 | sampled frames per second for OCR (0 < x ≤ 4) |
+| `GAME_VISION_MIN_OCR_CONFIDENCE` | 60.0 | min tesseract line confidence (0-100) |
+| `GAME_VISION_MAX_FRAMES_PER_CHUNK` | 1200 | hard cap on sampled frames per chunk |
+| `GAME_VISION_MAX_OCR_OPERATIONS_PER_CHUNK` | 800 | hard cap on OCR subprocess runs per chunk |
+| `GAME_VISION_MAX_CHUNK_SECONDS` | 240 | wall budget for the whole per-chunk game-vision pass |
+| `GAME_VISION_FRAME_TIMEOUT_SECONDS` | 120 | per-chunk frame-extraction budget (killed after) |
+| `GAME_VISION_OCR_TIMEOUT_SECONDS` | 30 | per-OCR-subprocess budget (killed after) |
+| `GAME_VISION_OCR_LANGUAGE` | eng | tesseract language (pack must be installed explicitly) |
+| `GAME_VISION_TESSDATA_DIR` | *(unset)* | explicit tessdata dir (never downloaded at runtime) |
+| `GAME_VISION_TESSERACT_BINARY` | *(unset)* | explicit tesseract binary (None = PATH) |
+| `GAME_VISION_KILL_FEED_ROI` | 0.80,0.02,0.18,0.12 | 'x,y,w,h' normalized kill-feed region (empty = full frame) |
 
 Resources: RAM bounded per chunk (audio WAV ≈ 19 MB at 600 s; fusion/
 selection input < 1 MB even for a 24 h VOD); per-chunk temp files deleted
@@ -487,3 +501,84 @@ persist/resume/dedup across the overlap; unavailable recorded honestly;
 cancellation writes nothing + cleans frames); and 5 **real-model**
 smoke tests that skip cleanly when the extra/models are absent
 (CI runs them in a best-effort step).
+
+## 14. Game Vision Intelligence (TASK 009 — Phase 8)
+
+A real, local-first **OCR-based** gameplay modality for the intel
+pipeline. **OFF by default**; enabling it requires the system
+`tesseract-ocr` package (plus the optional Pillow extra). When
+disabled or unavailable the pipeline is exactly as before — zero
+overhead, zero behavioral change, no fabricated data.
+
+**What it measures (OCR-observed content only — never verified game
+state):**
+- **OCR (A)**: visible text + numeric values from sampled frames, with
+  timestamps and per-line confidence; conservative normalization
+  (case/punctuation preserved); missing binary/tessdata/language →
+  honest `unavailable`.
+- **HUD (B)**: stable interface text (lines persisting in ≥ 50% of a
+  chunk's frames — region stability measured, game-agnostic) + a
+  frame-to-frame region change metric (Pillow; honestly skipped when
+  absent). Regions of interest are **configuration** (normalized
+  `x,y,w,h`), not hardcoded game assumptions; full-frame scan is
+  supported.
+- **Kill feed (C)**: transient text in the configured region across
+  consecutive frames — new vs persistent distinguished, fade-jitter
+  merged (the same physical line is never counted twice),
+  disappearance recorded, raw text + confidence kept as evidence.
+- **Scoreboard (D)**: visibility via a strict text-density heuristic
+  (labeled as such) + `label value` pairs extracted ONLY where OCR read
+  them; value changes reported only when both readings were observed —
+  an unreadable frame breaks the chain rather than fabricating a change.
+- **Gameplay events (E)**: conservative candidates — `kill_feed_entry`,
+  `scoreboard_appearance`, `score_change`, `match_result_text`
+  (generic tokens, EXACT full-line match). Every candidate is flagged
+  `directly_observed` and its interpretation is recorded as heuristic.
+
+**Implementation (`worker/app/intel/game_vision/`)**: `config.py`
+(validated bounds), `ocr.py` (engine interface + direct tesseract-CLI
+TSV engine with per-op timeout + kill, no wrapper dependency),
+`frames.py` (bounded extraction + FFmpeg `crop`/`scale` ROIs — the VOD
+is never decoded whole), `hud.py`, `kill_feed.py`, `scoreboard.py`,
+`events.py`, `signals.py` (family `game_vision`), `__init__.py`
+(analyzer + Null + builder + job summary).
+
+**Integration**: events enter `raw_events` BEFORE midpoint ownership —
+existing `event_key`/checkpoint/dedup semantics apply unchanged (overlap
+events persisted exactly once). Per-chunk summary nested in
+`features.game_vision` (jsonb — **no schema change, NO migration**).
+Fusion: `game_vision_weight` 0.5, solo factor 0.4 — low-confidence
+OCR-only observations can never qualify a clip alone (strength ≥ 0.625
+needed). Selection: categories for game-vision evidence are labeled
+heuristic. Cancellation → `PipelineCancelled` (no writes); temp dirs +
+subprocesses released on EVERY exit path; analyzer closed on every
+pipeline exit.
+
+**Model/dependency policy**: tesseract is the public, **Apache-2.0**
+system package (Debian/Ubuntu: `tesseract-ocr` + `tesseract-ocr-eng`);
+the binary + language packs are explicitly configured and validated
+(binary → tessdata → version probe, deterministic order), **never
+downloaded during job execution**. No cloud OCR, no paid API, CPU-only.
+Pillow (MIT) lives in `worker/requirements-game-vision.txt` — NOT in
+the base install.
+
+**Resource limits (enforced)**: frames/chunk ≤ 1200; OCR ops/chunk ≤
+800; wall budget 240 s/chunk (checked between ops — on budget, the
+report records `budget_exceeded` + `frames_remaining` and keeps the
+events already measured); per-OCR subprocess 30 s (killed); images
+capped at 1280 px; consecutive OCR errors ≥ 10 → sticky honest
+unavailable.
+
+**Tests (`worker/tests/test_game_vision.py`)**: 64 tests — stub-OCR
+logic (OCR success/unavailable/bad binary/bad tessdata; TSV parsing;
+HUD stability + change metric; kill-feed appear/persist/disappear/
+fade-jitter dedup/distinct re-appearance/exclusions/bounds; scoreboard
+detection/change tracking/no-fabrication; event kinds; absolute
+timestamps at nonzero offsets; op cap / wall budget / sticky
+degradation; cancellation + cleanup; pipeline disabled-unchanged /
+persist-resume-dedup / honest unavailable / nested summary / facecam
+coexistence; fusion + selection integration) plus 4 **real-OCR** smoke
+tests (PIL-rendered text) that skip cleanly without tesseract (CI runs
+them in a best-effort step). **Synthetic fixtures only — no real-world
+detection accuracy is claimed; there is no annotated real-VOD
+evaluation (known limitation).**

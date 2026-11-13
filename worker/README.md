@@ -266,6 +266,18 @@ startup (see `app/config/settings.py`):
 | `WORKER_FACECAM_DETECTOR_MODEL_PATH` | *(unset)* | EXPLICIT path to `blaze_face_short_range.tflite` (Apache-2.0, ~225 KB, `https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/latest/blaze_face_short_range.tflite`). Weights are NEVER downloaded during job execution |
 | `WORKER_FACECAM_LANDMARKER_MODEL_PATH` | *(unset)* | Optional `face_landmarker.task` (Apache-2.0, ~3.6 MB, `https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task`) — enables facial-geometry metrics (mouth/smile/brow/head); without it only face presence is reported |
 | `WORKER_FACECAM_FRAME_TIMEOUT_SECONDS` | `120` | Wall-clock budget for the per-chunk frame-extraction pass (the subprocess is killed after it) |
+| `WORKER_GAME_VISION_ENABLED` | `false` | Phase 8 game-vision modality (local OCR). OFF by default; requires the system `tesseract-ocr` package (`sudo apt-get install tesseract-ocr tesseract-ocr-eng`) and the optional extra (`pip install -r requirements-game-vision.txt`). Missing binary/tessdata → honest "unavailable" (recorded, no events, pipeline otherwise unchanged) |
+| `WORKER_GAME_VISION_SAMPLE_FPS` | `1.0` | Sampled frames per second for OCR (0 < x ≤ 4) |
+| `WORKER_GAME_VISION_MIN_OCR_CONFIDENCE` | `60.0` | Minimum tesseract line confidence (0-100); below = unreadable, filtered (never fabricated) |
+| `WORKER_GAME_VISION_MAX_FRAMES_PER_CHUNK` | `1200` | Hard cap on sampled frames per chunk |
+| `WORKER_GAME_VISION_MAX_OCR_OPERATIONS_PER_CHUNK` | `800` | Hard cap on OCR subprocess runs per chunk (on budget: `budget_exceeded` recorded, measured events kept) |
+| `WORKER_GAME_VISION_MAX_CHUNK_SECONDS` | `240` | Wall-clock budget for the whole per-chunk game-vision pass |
+| `WORKER_GAME_VISION_FRAME_TIMEOUT_SECONDS` | `120` | Per-chunk frame-extraction budget (subprocess killed after) |
+| `WORKER_GAME_VISION_OCR_TIMEOUT_SECONDS` | `30` | Per-OCR-subprocess budget (killed after) |
+| `WORKER_GAME_VISION_OCR_LANGUAGE` | `eng` | Tesseract language code; the matching language pack must be installed explicitly (never downloaded at runtime) |
+| `WORKER_GAME_VISION_TESSDATA_DIR` | *(unset)* | EXPLICIT directory containing `<language>.traineddata` (None = system default) |
+| `WORKER_GAME_VISION_TESSERACT_BINARY` | *(unset)* | EXPLICIT tesseract binary path (None = resolved from PATH) |
+| `WORKER_GAME_VISION_KILL_FEED_ROI` | `0.80,0.02,0.18,0.12` | Kill-feed region 'x,y,w,h' normalized (default top-right strip — a DEFAULT, not a game assumption; empty = full-frame scan) |
 | `WORKER_CAPTION_FONT_FAMILY` | `DejaVu Sans` | libass font family (fontconfig-resolved; no markup characters) |
 | `WORKER_CAPTION_FONT_SIZE` | `88` | Glyph size in PlayRes pixels (24-200) |
 | `WORKER_CAPTION_BASE_COLOR` | `FFFFFF` | Spoken-word color (RRGGBB) — ASS PrimaryColour |
