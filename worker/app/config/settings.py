@@ -11,7 +11,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["development", "staging", "production"]
@@ -57,6 +57,39 @@ class Settings(BaseSettings):
     ffmpeg_path: str = "ffmpeg"
     ffprobe_path: str = "ffprobe"
     ffprobe_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
+
+    # --- Phase 4: transcription / analysis ------------------------------------
+    #: Local Whisper model (tiny, base, small, medium, large-v3, ...).
+    #: EMPTY = transcription disabled: analysis jobs fail honestly with
+    #: ``transcription_unavailable`` (never fabricated output).
+    whisper_model: str = ""
+    #: Force a transcription language (e.g. "en", "fr"); empty = auto-detect.
+    transcription_language: str | None = None
+    #: Long-recording chunking: chunk length + overlap between consecutive
+    #: chunks (the overlap is what keeps sentences whole at boundaries).
+    transcription_chunk_seconds: int = Field(default=300, ge=30, le=1800)
+    transcription_overlap_seconds: int = Field(default=15, ge=0, le=120)
+    #: Whisper runtime (local inference only — no cloud, no credentials).
+    whisper_device: str = "cpu"
+    whisper_compute_type: str = "int8"
+    #: Audio extraction format / limits.
+    audio_sample_rate: int = Field(default=16000, ge=8000, le=48000)
+    audio_extract_timeout_seconds: float = Field(default=600.0, gt=0, le=3600)
+
+    @field_validator("transcription_language")
+    @classmethod
+    def _empty_language_to_none(cls, value: str | None) -> str | None:
+        """An empty env var means 'auto-detect', not the literal ''."""
+        return value or None
+
+    @model_validator(mode="after")
+    def _chunking_sane(self) -> "Settings":
+        """The overlap must be strictly smaller than the chunk (fail fast)."""
+        if self.transcription_overlap_seconds >= self.transcription_chunk_seconds:
+            raise ValueError(
+                "WORKER_TRANSCRIPTION_OVERLAP_SECONDS must be smaller than WORKER_TRANSCRIPTION_CHUNK_SECONDS"
+            )
+        return self
 
     @property
     def upload_dir(self) -> Path:

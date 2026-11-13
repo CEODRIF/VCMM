@@ -8,8 +8,17 @@ Supabase Postgres queue, downloads the source from private Supabase Storage,
 validates the real bytes with FFprobe, and marks the job `ready` (with
 measured media metadata) — or fails it with a safe, categorized error
 (bounded retries for transient errors; immediate terminal failure for
-unrecoverable media). AI transcription/analysis (Phase 4) and rendering
-(Phase 5) are not yet implemented.
+unrecoverable media).
+
+Phase 4 adds the **AI processing engine**: claimed `ready` jobs move to
+`transcribing` (the claim RPC is stage-aware), the worker extracts the audio
+track (FFmpeg → mono 16 kHz WAV), transcribes it with the **local**
+Whisper-compatible engine (word-level timestamps, controlled chunking for
+long recordings), detects complete-idea clip windows within the requested
+60-180s duration, scores them with an explainable 5-criterion ranking, and
+persists the clips (score + per-criterion reasons) into `clips`. The job then
+**parks at `analyzing`** (lock cleared, not claimable) — the Phase 5 renderer
+picks it up. The worker never marks a job `completed`.
 
 ## Storage model — read this first
 
@@ -26,8 +35,41 @@ volume.)
 - `ffprobe` (and `ffmpeg`, used by tests to generate synthetic fixtures) on
   the host or in the image — or set `WORKER_FFPROBE_PATH` /
   `WORKER_FFMPEG_PATH`. The Docker image installs them via apt.
-- The Phase 3 database migration applied to the same Supabase project
-  (queue RPCs are granted to `service_role`).
+- The Phase 3 **and 4** database migrations applied to the same Supabase
+  project (queue RPCs are granted to `service_role`).
+
+### Transcription engine (Phase 4, optional but required to produce clips)
+
+The base `requirements.txt` starts the worker WITHOUT any AI dependency.
+To enable transcription, install the optional engine (local inference only —
+no cloud, no credentials, no paid APIs):
+
+```bash
+pip install -r requirements.txt -r requirements-optional.txt
+```
+
+> `requirements-optional.txt` pins `faster-whisper==1.2.1` and `av>=11,<16`
+> — `av` must stay below 16 (faster-whisper 1.2.x uses a PyAV argument that
+> version 16 removed).
+
+Then select a model (`tiny` is the smallest and is enough to validate the
+pipeline; `small`/`medium` give better accuracy at a CPU cost):
+
+```bash
+export WORKER_WHISPER_MODEL=small        # empty/absent = transcription disabled
+export WORKER_TRANSCRIPTION_LANGUAGE=fr  # optional; default = auto-detect
+```
+
+On first use the model weights are downloaded once from Hugging Face to the
+local cache (a plain file download — no account, no API key, no cost).
+**Without the optional packages (or with an empty `WORKER_WHISPER_MODEL`)
+the worker still runs, and analysis jobs fail honestly** with the permanent
+category `transcription_unavailable` — no fake output is ever produced.
+
+Other Phase 4 knobs (defaults in brackets): `WORKER_TRANSCRIPTION_CHUNK_SECONDS`
+[300], `WORKER_TRANSCRIPTION_OVERLAP_SECONDS` [15], `WORKER_WHISPER_DEVICE`
+[cpu], `WORKER_WHISPER_COMPUTE_TYPE` [int8], `WORKER_AUDIO_SAMPLE_RATE` [16000],
+`WORKER_AUDIO_EXTRACT_TIMEOUT_SECONDS` [600].
 
 ## Local development
 

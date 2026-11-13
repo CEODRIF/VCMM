@@ -113,3 +113,60 @@ def test_phase3_env_vars_are_picked_up(monkeypatch):
     assert settings.concurrency == 4
     assert settings.poll_interval == 5
     assert settings.max_attempts == 5
+
+
+def test_phase4_transcription_defaults_are_safe():
+    # Empty model = transcription DISABLED (honest unavailability, no cloud).
+    settings = Settings()
+    assert settings.whisper_model == ""
+    assert settings.transcription_language is None
+    assert settings.transcription_chunk_seconds == 300
+    assert settings.transcription_overlap_seconds == 15
+    assert settings.whisper_device == "cpu"
+    assert settings.whisper_compute_type == "int8"
+    assert settings.audio_sample_rate == 16000
+    assert settings.audio_extract_timeout_seconds == 600.0
+
+
+def test_phase4_env_vars_are_picked_up(monkeypatch):
+    monkeypatch.setenv("WORKER_WHISPER_MODEL", "small")
+    monkeypatch.setenv("WORKER_TRANSCRIPTION_LANGUAGE", "fr")
+    monkeypatch.setenv("WORKER_TRANSCRIPTION_CHUNK_SECONDS", "600")
+    monkeypatch.setenv("WORKER_TRANSCRIPTION_OVERLAP_SECONDS", "30")
+    monkeypatch.setenv("WORKER_WHISPER_DEVICE", "cpu")
+    settings = Settings()
+    assert settings.whisper_model == "small"
+    assert settings.transcription_language == "fr"
+    assert settings.transcription_chunk_seconds == 600
+    assert settings.transcription_overlap_seconds == 30
+
+
+def test_empty_language_env_means_auto_detect(monkeypatch):
+    monkeypatch.setenv("WORKER_TRANSCRIPTION_LANGUAGE", "")
+    assert Settings().transcription_language is None
+    assert Settings(transcription_language="").transcription_language is None
+
+
+def test_chunking_bounds():
+    with pytest.raises(ValidationError):
+        Settings(transcription_chunk_seconds=29)
+    with pytest.raises(ValidationError):
+        Settings(transcription_chunk_seconds=1801)
+    with pytest.raises(ValidationError):
+        Settings(transcription_overlap_seconds=121)
+    # The overlap must stay strictly below the chunk.
+    with pytest.raises(ValidationError):
+        Settings(transcription_chunk_seconds=300, transcription_overlap_seconds=300)
+    with pytest.raises(ValidationError):
+        Settings(transcription_chunk_seconds=300, transcription_overlap_seconds=301)
+
+
+def test_audio_settings_bounds():
+    with pytest.raises(ValidationError):
+        Settings(audio_sample_rate=4000)
+    with pytest.raises(ValidationError):
+        Settings(audio_sample_rate=96000)
+    with pytest.raises(ValidationError):
+        Settings(audio_extract_timeout_seconds=0)
+    with pytest.raises(ValidationError):
+        Settings(audio_extract_timeout_seconds=3601)

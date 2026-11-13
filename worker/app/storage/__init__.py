@@ -1,1 +1,2 @@
-"""File storage helpers. Object-storage backends arrive in Phase 3."""
+"""File storage: path helpers, private Supabase Storage (Phase 3), and
+clip persistence (Phase 4)."""
