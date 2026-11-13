@@ -2,7 +2,8 @@
 
 The browser's extension/MIME is never trusted — these tests probe the actual
 bytes: container whitelist, video-stream presence, audio availability,
-duration (SOURCE limit, not the 60-180s clip setting), resolution and size.
+duration (measured, NO source cap since TASK 007), frame rate, resolution
+and size.
 """
 
 from __future__ import annotations
@@ -104,7 +105,7 @@ def test_probe_missing_file_raises_invalid_file(ffprobe_bin, tmp_path):
 
 def test_validate_media_returns_safe_metadata(ffprobe_bin, synthetic_videos):
     info = probe(ffprobe_bin, synthetic_videos["valid"])
-    metadata = validate_media(info, max_source_duration_seconds=8 * 3600, max_upload_size_bytes=2 * 1024**3)
+    metadata = validate_media(info, max_upload_size_bytes=2 * 1024**3)
     assert set(metadata) == {
         "container",
         "duration_seconds",
@@ -114,9 +115,18 @@ def test_validate_media_returns_safe_metadata(ffprobe_bin, synthetic_videos):
         "has_audio",
         "audio_codec",
         "file_size_bytes",
+        "avg_fps",
     }
     assert metadata["width"] == 320
     assert metadata["height"] == 240
+
+
+def test_probe_media_reports_measured_avg_fps(ffprobe_bin, synthetic_videos):
+    # The synthetic fixture is generated at rate=10 (conftest) — the measured
+    # rate must be a fact from ffprobe, not an assumption.
+    info = probe(ffprobe_bin, synthetic_videos["valid"])
+    assert info.avg_fps is not None
+    assert 9.0 <= info.avg_fps <= 11.0
 
 
 def _info(**overrides) -> MediaInfo:
@@ -135,21 +145,18 @@ def _info(**overrides) -> MediaInfo:
     return MediaInfo(**base)
 
 
-def test_validate_media_enforces_source_duration_limit():
-    # 120s source vs a 60s infrastructure limit → rejected. The 60-180s clip
-    # setting is deliberately NOT involved here.
-    with pytest.raises(MediaValidationError) as exc:
-        validate_media(_info(), max_source_duration_seconds=60, max_upload_size_bytes=2 * 1024**3)
-    assert exc.value.category == ERROR_SOURCE_TOO_LONG
+def test_validate_media_has_no_source_duration_cap():
+    # TASK 007: a 30-HOUR source is accepted — there is no product-level
+    # duration cap anymore. Only the (disk) size limit bounds the source.
+    metadata = validate_media(
+        _info(duration_seconds=30 * 3600), max_upload_size_bytes=2 * 1024**3
+    )
+    assert metadata["duration_seconds"] == 30 * 3600
 
 
 def test_validate_media_enforces_file_size_limit():
     with pytest.raises(MediaValidationError) as exc:
-        validate_media(
-            _info(file_size_bytes=10),
-            max_source_duration_seconds=8 * 3600,
-            max_upload_size_bytes=5,
-        )
+        validate_media(_info(file_size_bytes=10), max_upload_size_bytes=5)
     assert exc.value.category == ERROR_SOURCE_TOO_LARGE
 
 

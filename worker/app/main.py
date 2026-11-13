@@ -60,6 +60,9 @@ def build_worker(settings: Settings):
         profile=profile,
         timeout_seconds=settings.render_timeout_seconds,
         probe_timeout_seconds=settings.ffprobe_timeout_seconds,
+        fps_low=settings.render_fps_low,
+        fps_high=settings.render_fps_high,
+        fps_high_source_threshold=settings.render_fps_high_source_threshold,
     )
     rendering = RenderProcessor(settings, queue, storage, clip_store, renderer)
     return IngestionWorker(settings, queue, storage, analysis=analysis, rendering=rendering)

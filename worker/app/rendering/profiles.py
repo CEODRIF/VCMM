@@ -85,6 +85,28 @@ def plan_video_filter(
     return f"scale={sw}:{sh},pad={out_width}:{out_height}:(ow-{sw})/2:(oh-{sh})/2:black"
 
 
+def select_output_fps(
+    source_fps: float | None,
+    fps_low: int = 30,
+    fps_high: int = 60,
+    high_source_threshold: float = 55.0,
+) -> int:
+    """Picks the output frame rate from the MEASURED source rate (TASK 007).
+
+    - source at or above ``high_source_threshold`` (≈60 fps gameplay) →
+      ``fps_high``: high-fps footage is never dropped to 30;
+    - anything lower (or an unknown rate) → ``fps_low``: the legacy default,
+      which never duplicates frames to fake a higher rate.
+
+    Deterministic; the returned value is what ``-r`` is passed, so the
+    rendered clip's fps is always a measured fact (verified by ffprobe in
+    tests), not a claim.
+    """
+    if source_fps is not None and source_fps >= high_source_threshold:
+        return fps_high
+    return fps_low
+
+
 def _even_ceil(x: float) -> int:
     n = int(math.ceil(x))
     return n + 1 if n % 2 else n
@@ -101,6 +123,8 @@ class RenderProfile:
 
     width: int = 1080
     height: int = 1920
+    #: Default (fallback) output frame rate. Source-aware selection
+    #: (``select_output_fps``) overrides this per clip (TASK 007).
     fps: int = 30
     video_codec: str = "libx264"
     crf: int = 20
@@ -112,13 +136,16 @@ class RenderProfile:
     #: "cover" (center crop, default) or "contain" (black pad).
     fit: str = "cover"
 
-    def ffmpeg_video_args(self) -> list[str]:
+    def ffmpeg_video_args(self, fps: int | None = None) -> list[str]:
+        """Encoder args. ``fps`` overrides the profile default for
+        source-aware rate selection (TASK 007); omitted = profile ``fps``."""
+        effective = self.fps if fps is None else fps
         return [
             "-c:v", self.video_codec,
             "-preset", self.preset,
             "-crf", str(self.crf),
             "-pix_fmt", self.pix_fmt,
-            "-r", str(self.fps),
+            "-r", str(effective),
         ]
 
     def ffmpeg_audio_args(self) -> list[str]:

@@ -55,7 +55,9 @@ def test_phase3_queue_defaults():
     assert settings.job_lease_seconds == 300
     assert settings.max_attempts == 3
     assert settings.max_upload_size_bytes == 2 * 1024**3
-    assert settings.max_source_duration_seconds == 8 * 3600
+    # TASK 007: the product-level source-duration cap is GONE — recordings
+    # are analyzed incrementally, so no max-duration setting may exist.
+    assert not hasattr(settings, "max_source_duration_seconds")
     assert settings.ffmpeg_path == "ffmpeg"
     assert settings.ffprobe_path == "ffprobe"
     assert settings.supabase_configured is False
@@ -250,3 +252,27 @@ def test_caption_color_and_font_validation():
         Settings(caption_margin_v=59)
     with pytest.raises(ValidationError):
         Settings(caption_words_per_line=9)
+
+
+def test_phase7_intel_operational_defaults():
+    # TASK 007: operational (resource) limits exist; NO duration cap does not.
+    settings = Settings()
+    assert settings.intel_chunk_seconds == 600
+    assert settings.intel_overlap_seconds == 30
+    assert settings.intel_chunks_per_claim == 20
+    assert settings.intel_scene_threshold == 0.3
+    assert settings.intel_requested_clips == 5
+    # overlap must stay < chunk or fail fast
+    with pytest.raises(ValidationError):
+        Settings(intel_overlap_seconds=600, intel_chunk_seconds=600)
+    with pytest.raises(ValidationError):
+        Settings(intel_chunks_per_claim=0)
+
+
+def test_phase7_source_aware_fps_defaults():
+    settings = Settings()
+    assert settings.render_fps_low == 30
+    assert settings.render_fps_high == 60
+    assert settings.render_fps_high_source_threshold == 55.0
+    with pytest.raises(ValidationError):
+        Settings(render_fps_low=70, render_fps_high=60)  # low must be <= high

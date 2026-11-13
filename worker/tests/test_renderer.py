@@ -21,6 +21,7 @@ from app.rendering.ffmpeg import FFmpegError
 from app.rendering.profiles import RenderProfile
 from app.rendering.renderer import FFmpegRenderer
 from app.rendering.validation import verify_render_output
+from app.validation.media import probe_media
 from conftest import _run_ffmpeg, patch_mp4_rotation
 
 
@@ -212,3 +213,46 @@ def test_window_duration_is_respected(ffmpeg_bin, ffprobe_bin, render_media, tmp
     info = run(verify_render_output(
         ffprobe_bin, out, RenderProfile(), expected_duration=1.5, timeout_seconds=30.0))
     assert abs(info.duration_seconds - 1.5) <= 0.225  # 15%
+
+
+# ---- source-aware frame rate (TASK 007) -----------------------------------------
+
+def _make_fps_source(ffmpeg_bin: str, tmp_path: Path, rate: int) -> Path:
+    """A 1920x1080 landscape clip at a fixed frame rate (H.264 + AAC)."""
+    src = tmp_path / f"src_{rate}fps.mp4"
+    _run_ffmpeg(
+        ffmpeg_bin,
+        ["-f", "lavfi", "-i", f"testsrc=duration=2:size=1920x1080:rate={rate}",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+         "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+         "-c:a", "aac", "-shortest", str(src)],
+    )
+    return src
+
+
+def test_60fps_source_renders_at_60fps(ffmpeg_bin, ffprobe_bin, tmp_path):
+    # High-fps gameplay must NOT be dropped to 30: a 60 fps source yields a
+    # 60 fps output (measured by ffprobe — a fact, not a claim).
+    src = _make_fps_source(ffmpeg_bin, tmp_path, 60)
+    assert run(probe_media(ffprobe_bin, src, 30.0)).avg_fps is not None
+    renderer = make_renderer(ffmpeg_bin, ffprobe_bin)
+    out = tmp_path / "out60.mp4"
+    run(renderer.render(str(src), 0.0, 2.0, RenderSpec(), str(out)))
+    info = run(verify_render_output(
+        ffprobe_bin, out, RenderProfile(), expected_duration=2.0, timeout_seconds=30.0))
+    assert (info.width, info.height) == (1080, 1920)
+    measured = run(probe_media(ffprobe_bin, out, 30.0)).avg_fps
+    assert measured is not None and measured >= 55.0, f"60fps source rendered at {measured}fps"
+
+
+def test_30fps_source_renders_at_30fps(ffmpeg_bin, ffprobe_bin, tmp_path):
+    # A 30 fps source keeps the profile default (30) — frames are never
+    # duplicated to fake a higher rate.
+    src = _make_fps_source(ffmpeg_bin, tmp_path, 30)
+    renderer = make_renderer(ffmpeg_bin, ffprobe_bin)
+    out = tmp_path / "out30.mp4"
+    run(renderer.render(str(src), 0.0, 2.0, RenderSpec(), str(out)))
+    run(verify_render_output(
+        ffprobe_bin, out, RenderProfile(), expected_duration=2.0, timeout_seconds=30.0))
+    measured = run(probe_media(ffprobe_bin, out, 30.0)).avg_fps
+    assert measured is not None and 28.0 <= measured <= 32.0, f"30fps source rendered at {measured}fps"

@@ -12,7 +12,12 @@ import math
 
 import pytest
 
-from app.rendering.profiles import RenderProfile, effective_dimensions, plan_video_filter
+from app.rendering.profiles import (
+    RenderProfile,
+    effective_dimensions,
+    plan_video_filter,
+    select_output_fps,
+)
 
 
 def _scale_of(plan: str) -> tuple[int, int]:
@@ -205,3 +210,37 @@ def test_profile_video_filter_delegates_to_planner():
 def test_profile_contain_fit_is_selectable():
     p = RenderProfile(fit="contain")
     assert p.video_filter(1920, 1080, 0) == plan_video_filter(1920, 1080, 0, 1080, 1920, "contain")
+
+
+def test_ffmpeg_video_args_fps_override():
+    p = RenderProfile()
+    # Default keeps the profile rate...
+    assert p.ffmpeg_video_args()[-2:] == ["-r", "30"]
+    # ...and a source-aware override changes only the -r value.
+    assert p.ffmpeg_video_args(60)[-2:] == ["-r", "60"]
+    assert p.ffmpeg_video_args(30)[-2:] == ["-r", "30"]
+
+
+# ---- source-aware frame-rate selection (TASK 007) ---------------------------------
+
+def test_select_output_fps_preserves_high_fps_sources():
+    # 60 / 59.94 / 55 fps gameplay must render at the HIGH rate, never dropped.
+    assert select_output_fps(60.0) == 60
+    assert select_output_fps(59.94) == 60
+    assert select_output_fps(55.0) == 60
+
+
+def test_select_output_fps_keeps_low_fps_sources_low():
+    # 30 / 24 / 10 fps sources keep the default (no frame duplication).
+    assert select_output_fps(30.0) == 30
+    assert select_output_fps(24.0) == 30
+    assert select_output_fps(10.0) == 30
+
+
+def test_select_output_fps_unknown_rate_falls_back_to_low():
+    assert select_output_fps(None) == 30
+
+
+def test_select_output_fps_respects_custom_thresholds():
+    assert select_output_fps(45.0, fps_low=25, fps_high=48, high_source_threshold=40.0) == 48
+    assert select_output_fps(30.0, fps_low=25, fps_high=48, high_source_threshold=40.0) == 25

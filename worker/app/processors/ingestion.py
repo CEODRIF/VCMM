@@ -86,11 +86,9 @@ class IngestionProcessor:
                 destination,
                 self._settings.ffprobe_timeout_seconds,
             )
-            metadata = validate_media(
-                info,
-                self._settings.max_source_duration_seconds,
-                self._settings.max_upload_size_bytes,
-            )
+            # No source-duration cap (TASK 007): the size cap bounds disk,
+            # long recordings are analyzed incrementally downstream.
+            metadata = validate_media(info, self._settings.max_upload_size_bytes)
             await self._report(job_id, worker_id, 80)
 
             # 3) Mark ingestion complete (validating → ready, lock released).
