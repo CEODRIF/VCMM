@@ -66,6 +66,7 @@ from .game_vision import (
 )
 from .game_vision.ocr import OcrError
 from .fusion import FusionConfig, fuse
+from .multimodal import MultimodalConfig, derive_availability, fuse_multimodal
 from .selection import SelectedClip, SelectionConfig, select_clips
 from .signals import SignalEvent
 from .visual_features import VisualFeatureError, extract_visual_features
@@ -99,6 +100,11 @@ class PipelineConfig:
     #: TASK 009: game vision modality config (None = disabled → same
     #: guarantee as facecam: zero overhead, zero behavioral change).
     game_vision: GameVisionConfig | None = None
+    #: TASK 010: advanced multimodal fusion ENGINE config. None = disabled
+    #: → completion runs Phase 7 ``fuse()`` EXACTLY as before (verified by
+    #: an A/B pipeline test); a config → the engine upgrades the
+    #: confidence + provenance of the same qualifying candidates.
+    multimodal: MultimodalConfig | None = None
 
     def __post_init__(self) -> None:
         if self.overlap_seconds < 0 or self.overlap_seconds >= self.chunk_seconds:
@@ -124,6 +130,10 @@ class PipelineResult:
     #: counts, processing time) — {} when disabled, {"available": False,
     #: "reason": ...} when configured but unavailable (never fabricated).
     game_vision: dict[str, Any] = field(default_factory=dict)
+    #: TASK 010: job-level multimodal engine summary (status, budgets,
+    #: quarantine/suppression counts, availability) — {} when the engine
+    #: was disabled (the pipeline behaved exactly as before).
+    multimodal: dict[str, Any] = field(default_factory=dict)
 
 
 class StreamIntelPipeline:
@@ -327,7 +337,6 @@ class StreamIntelPipeline:
 
         # -- complete: fusion + selection over the stored evidence -------------
         events = await self._store.load_events(job_id)
-        windows = fuse(events, cfg.fusion)
         # Silence gaps + per-chunk summaries for boundary snapping
         # (chunks done in a PREVIOUS run AND in this one).
         all_summaries = {**done, **{idx: {"features": s} for idx, s in new_summaries.items()}}
@@ -345,13 +354,6 @@ class StreamIntelPipeline:
             if "game_vision" in feats:
                 game_vision_summaries.append(feats["game_vision"])
         silence_gaps.sort()
-        candidates = select_clips(
-            windows,
-            total_duration=total_duration,
-            silence_gaps=silence_gaps,
-            requested_clips=cfg.requested_clips,
-            cfg=cfg.selection,
-        )
         facecam_meta = (
             summarize_facecam(facecam_summaries)
             if cfg.facecam is not None and facecam_summaries else {}
@@ -359,6 +361,44 @@ class StreamIntelPipeline:
         game_vision_meta = (
             summarize_game_vision(game_vision_summaries)
             if cfg.game_vision is not None and game_vision_summaries else {}
+        )
+
+        # TASK 010: fusion. Disabled (default) → EXACTLY the Phase 7
+        # fuse() (byte-identical windows); enabled → the multimodal
+        # engine over the SAME stored events (same qualification bar via
+        # the unchanged score_cluster; upgraded confidence + provenance).
+        # It is a pure function of the persisted evidence, so resume
+        # determinism is unchanged (re-running completion re-derives the
+        # same candidates from the same rows).
+        multimodal_meta: dict[str, Any] = {}
+        if cfg.multimodal is not None:
+            availability = derive_availability(
+                facecam_meta=facecam_meta,
+                game_vision_meta=game_vision_meta,
+                facecam_enabled=cfg.facecam is not None,
+                game_vision_enabled=cfg.game_vision is not None,
+                facecam_event_count=sum(1 for e in events if e.family == "facecam"),
+                game_vision_event_count=sum(1 for e in events if e.family == "game_vision"),
+            )
+            mm_result = fuse_multimodal(
+                events,
+                job_id=job_id,
+                total_duration=total_duration,
+                fusion_cfg=cfg.fusion,
+                cfg=cfg.multimodal,
+                availability=availability,
+            )
+            windows = mm_result.windows
+            multimodal_meta = mm_result.summary
+        else:
+            windows = fuse(events, cfg.fusion)
+
+        candidates = select_clips(
+            windows,
+            total_duration=total_duration,
+            silence_gaps=silence_gaps,
+            requested_clips=cfg.requested_clips,
+            cfg=cfg.selection,
         )
         return PipelineResult(
             status="complete",
@@ -370,4 +410,5 @@ class StreamIntelPipeline:
             features_summaries=summaries,
             facecam=facecam_meta,
             game_vision=game_vision_meta,
+            multimodal=multimodal_meta,
         )

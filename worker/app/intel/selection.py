@@ -316,6 +316,22 @@ def select_clips(
     clips: list[SelectedClip] = []
     for w in deduped:
         category, why = _categorize(w)
+        evidence: dict[str, Any] = {
+            "why": why,
+            "heuristic_category": True,
+            "families": list(w.families),
+            "family_strengths": w.family_strengths,
+            "event_kinds": sorted({e.kind for e in w.events}),
+            "event_times": [round(e.t, 3) for e in w.events],
+        }
+        # TASK 010 (backward-compatible): when the multimodal engine produced
+        # this window, its size-bounded provenance (independent modalities,
+        # duplicates, pattern, heuristic-confidence calc) rides along so the
+        # selected moment stays explainable. Absent in Phase 7 mode — the
+        # evidence shape is otherwise byte-identical.
+        multimodal_prov = w.reasons.get("multimodal")
+        if multimodal_prov:
+            evidence["multimodal"] = multimodal_prov
         clips.append(SelectedClip(
             start=w.start,
             end=w.end,
@@ -323,14 +339,7 @@ def select_clips(
             confidence=w.confidence,
             category=category,
             source_windows=[w],
-            evidence={
-                "why": why,
-                "heuristic_category": True,
-                "families": list(w.families),
-                "family_strengths": w.family_strengths,
-                "event_kinds": sorted({e.kind for e in w.events}),
-                "event_times": [round(e.t, 3) for e in w.events],
-            },
+            evidence=evidence,
         ))
     clips.sort(key=lambda c: (-c.score, -c.confidence, c.start))
     return clips[: max(1, requested_clips)]
