@@ -1,0 +1,65 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Premium dark theme: charcoal surfaces with a subtle violet accent. */
+    --background: 240 12% 5%;
+    --foreground: 240 8% 96%;
+
+    --card: 240 10% 8%;
+    --card-foreground: 240 8% 96%;
+
+    --popover: 240 10% 8%;
+    --popover-foreground: 240 8% 96%;
+
+    --primary: 262 83% 62%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 240 8% 14%;
+    --secondary-foreground: 240 8% 96%;
+
+    --muted: 240 8% 14%;
+    --muted-foreground: 240 5% 64%;
+
+    --accent: 262 45% 18%;
+    --accent-foreground: 262 60% 88%;
+
+    --destructive: 0 72% 56%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 240 8% 15%;
+    --input: 240 8% 18%;
+    --ring: 262 83% 62%;
+
+    --radius: 0.75rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    @apply scroll-smooth;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+}
+
+@layer utilities {
+  /* Subtle violet glow used behind the hero and primary cards. */
+  .glow-primary {
+    background: radial-gradient(
+      ellipse 60% 45% at 50% 0%,
+      hsl(var(--primary) / 0.16),
+      transparent 70%
+    );
+  }
+
+  .card-surface {
+    @apply border bg-card/80 backdrop-blur-sm;
+  }
+}
