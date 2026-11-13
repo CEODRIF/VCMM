@@ -11,7 +11,12 @@ Writes the detected clips into the EXISTING ``public.clips`` table:
   retried analysis replaces only its own clips and can never touch
   another job's rows (RLS + scoping + the job FK all agree).
 
-``storage_path`` stays NULL: clips are not rendered until Phase 5.
+Phase 5 adds the rendering-side access: ``list_clips`` (read the job's clip
+set in sort order) and ``mark_clip`` (move ONE clip of ONE job to
+``processing``/``ready`` — every update is scoped to ``(id, job_id)`` so a
+stale worker can never touch another job's clips). ``storage_path`` is set
+when a clip is rendered AND stored — that is what the DB completion guard
+(``complete_job_rendering``) requires.
 """
 
 from __future__ import annotations
@@ -30,6 +35,9 @@ logger = logging.getLogger("clipforge.clips")
 CLIPS_TABLE = "clips"
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+#: The only clip statuses the worker may write (mirrors ``clips_status_check``).
+CLIP_STATUSES = frozenset({"pending", "processing", "ready", "failed"})
 
 
 class ClipsPersistenceError(RuntimeError):
@@ -84,6 +92,61 @@ class SupabaseClipStore:
             "score": clip.score,
             "scoring": clip.scoring,
             "sort_order": index,
-            "status": "pending",  # rendered in Phase 5
+            "status": "pending",
             "storage_path": None,
         }
+
+    async def list_clips(self, job_id: str) -> list[dict[str, Any]]:
+        """Returns the job's clips in sort order (the render input set).
+
+        Scoped to the single job; raises :class:`ClipsPersistenceError` on a
+        transport failure.
+        """
+        uuid_job = _as_job_uuid(job_id)
+        try:
+            result = await (
+                self._client.table(CLIPS_TABLE)
+                .select("id,title,start_time,end_time,status,storage_path,sort_order")
+                .eq("job_id", uuid_job)
+                .order("sort_order")
+                .execute()
+            )
+            return list(result.data or [])
+        except Exception as exc:  # noqa: BLE001 — transport boundary
+            logger.warning("clip list failed for job %s: %s", uuid_job, exc.__class__.__name__)
+            raise ClipsPersistenceError("clip rows could not be loaded") from exc
+
+    async def mark_clip(
+        self,
+        job_id: str,
+        clip_id: str,
+        status: str,
+        storage_path: str | None = None,
+    ) -> bool:
+        """Moves ONE clip of ONE job to ``status`` (optionally setting ``storage_path``).
+
+        The update is scoped to ``(id, job_id)`` — a stale worker can never
+        mark another job's clip. Returns True when a row was updated, False
+        when the clip no longer exists or is no longer owned (the caller
+        must then treat it as lost ownership and abort).
+        """
+        uuid_job = _as_job_uuid(job_id)
+        if not _UUID_RE.match(str(clip_id or "")):
+            raise ValueError("clip store requires a UUID clip id")
+        if status not in CLIP_STATUSES:
+            raise ValueError(f"unknown clip status: {status!r}")
+        values: dict[str, Any] = {"status": status}
+        if storage_path is not None:
+            values["storage_path"] = storage_path
+        try:
+            result = await (
+                self._client.table(CLIPS_TABLE)
+                .update(values)
+                .eq("id", str(clip_id))
+                .eq("job_id", uuid_job)
+                .execute()
+            )
+            return bool(result.data)
+        except Exception as exc:  # noqa: BLE001 — transport boundary
+            logger.warning("clip update failed for job %s: %s", uuid_job, exc.__class__.__name__)
+            raise ClipsPersistenceError("clip row could not be updated") from exc

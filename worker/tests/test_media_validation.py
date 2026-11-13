@@ -14,13 +14,17 @@ import pytest
 from app.queue.models import (
     ERROR_AUDIO_EXTRACTION,
     ERROR_CLIPS_PERSIST,
+    ERROR_CLIP_UPLOAD,
     ERROR_CORRUPT_MEDIA,
     ERROR_FFPROBE,
     ERROR_INVALID_FILE,
     ERROR_NO_AUDIO,
     ERROR_NO_CLIPS,
+    ERROR_NO_CLIPS_TO_RENDER,
     ERROR_NO_SPEECH,
     ERROR_NO_VIDEO_STREAM,
+    ERROR_RENDER_FAILED,
+    ERROR_RENDER_INVALID,
     ERROR_SOURCE_TOO_LARGE,
     ERROR_SOURCE_TOO_LONG,
     ERROR_STORAGE_DOWNLOAD,
@@ -165,6 +169,10 @@ def test_error_category_split_permanent_vs_transient():
         ERROR_TRANSCRIPTION_UNAVAILABLE,
         ERROR_NO_SPEECH,
         ERROR_NO_CLIPS,
+        # Phase 5 (rendering) — a contract-invalid render or an empty clip
+        # set cannot be fixed by retrying.
+        ERROR_RENDER_INVALID,
+        ERROR_NO_CLIPS_TO_RENDER,
     }
     # ...while infrastructure errors are retryable.
     for transient in (
@@ -173,6 +181,8 @@ def test_error_category_split_permanent_vs_transient():
         ERROR_AUDIO_EXTRACTION,
         ERROR_TRANSCRIPTION,
         ERROR_CLIPS_PERSIST,
+        ERROR_RENDER_FAILED,
+        ERROR_CLIP_UPLOAD,
         ERROR_UNKNOWN,
     ):
         assert transient not in PERMANENT_ERROR_CATEGORIES

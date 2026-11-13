@@ -76,6 +76,16 @@ class Settings(BaseSettings):
     audio_sample_rate: int = Field(default=16000, ge=8000, le=48000)
     audio_extract_timeout_seconds: float = Field(default=600.0, gt=0, le=3600)
 
+    # --- Phase 5: rendering ---------------------------------------------------
+    #: How many clips of one job may be rendered concurrently (each clip is
+    #: one FFmpeg subprocess; this bounds CPU/memory per worker).
+    render_concurrency: int = Field(default=2, ge=1, le=8)
+    #: Wall-clock budget for ONE clip render (the subprocess is killed after).
+    render_timeout_seconds: float = Field(default=900.0, gt=0, le=7200)
+    #: A rendered clip larger than this is a contract violation and is
+    #: rejected (not uploaded).
+    max_clip_size_bytes: int = Field(default=200 * 1024 * 1024, gt=0)
+
     @field_validator("transcription_language")
     @classmethod
     def _empty_language_to_none(cls, value: str | None) -> str | None:

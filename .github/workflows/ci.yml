@@ -58,6 +58,15 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Install FFmpeg/FFprobe (media + rendering integration tests)
+        # The worker media/rendering tests (FFprobe validation, audio
+        # extraction, real-FFmpeg renderer + processor lifecycles) skip
+        # cleanly when no binaries are available — so they must be present
+        # here, or they are silently skipped in CI.
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ffmpeg
+
       - name: Python syntax check
         run: python -m compileall -q app tests
 

@@ -8,17 +8,21 @@ ClipForge AI is a web application that transforms long-form videos into short-fo
 - Vertical 9:16 output at 1080x1920 (1080p) with modern animated subtitles.
 - Individual downloads and ZIP batch downloads.
 
-> **Status: Phase 4 — AI processing engine (audio, transcription, clip detection).**
-> On top of Phase 3 (real direct uploads, FFprobe validation, Postgres job
-> queue with atomic claiming, leases and crash recovery) and Phase 2's
-> access-code authentication and session-scoped job APIs, the worker now
-> extracts the audio track (FFmpeg), transcribes it with a local,
-> credential-free Whisper engine (word-level timestamps, controlled
-> chunking for long recordings), detects complete-idea clip windows within
-> the requested 60-180s duration, scores them with an explainable
-> multi-criterion ranking, and persists the results to `clips`. A job
-> finishes Phase 4 **parked at `analyzing`** — rendering (Phase 5) picks
-> parked jobs up. See `docs/ROADMAP.md`.
+> **Status: Phase 5A — rendering foundation (clip rendering pipeline).**
+> On top of Phase 4 (local Whisper transcription, clip detection and
+> explainable scoring, jobs parked at `analyzing`) and Phase 3 (real direct
+> uploads, FFprobe validation, Postgres job queue with atomic claiming,
+> leases and crash recovery), the worker now CLAIMS parked `analyzing` jobs
+> into a `rendering` stage, re-downloads the verified source, cuts each
+> detected clip window with a managed FFmpeg subprocess (rotation-correct,
+> aspect-ratio-preserving reframe to exact 1080x1920), validates every
+> rendered file against a strict output contract (MP4 / H.264 / AAC /
+> yuv420p / 1080x1920 / zero rotation / duration tolerance), uploads it to
+> the private `clipforge-clips` bucket, and marks the job `completed` ONLY
+> through a database guard that requires every clip to be `ready` with a
+> stored object path. Rendered output is NOT yet displayed or downloadable
+> (Phases 5b/6): subtitle burn-in arrives in Phase 5b, downloads in Phase 6.
+> See `docs/ROADMAP.md`.
 
 ## Technology stack
 
@@ -29,7 +33,7 @@ ClipForge AI is a web application that transforms long-form videos into short-fo
  | Database  | Supabase (Postgres) with Row Level Security                       |
  | Storage   | Supabase Storage (private buckets, signed upload URLs)            |
  | Worker    | Python 3.12, FastAPI, Pydantic, FFprobe, structured JSON logging  |
- | Pipeline  | Local Whisper (faster-whisper, optional), FFmpeg rendering (Phase 5) |
+  | Pipeline  | Local Whisper (faster-whisper, optional), FFmpeg rendering (Phase 5A; subtitles: Phase 5b) |
  | Tests/CI  | Vitest, pytest, GitHub Actions                                    |
 
 ## Architecture overview
@@ -50,14 +54,16 @@ ClipForge AI is a web application that transforms long-form videos into short-fo
         │  5  poll status (2.5s)      atomic claim → download → │
         └─────────────────────────────  FFprobe validate → ready│
                                                    ┌─────────────┴───────────┐
-                                                   │  Python worker          │
-                                                   │  (separate service)     │
-                                                   │  ingestion (Phase 3) +  │
-                                                   │  transcription + clip   │
-                                                   │  analysis (Phase 4) →   │
-                                                   │  parked at analyzing;   │
-                                                   │  render: Phase 5        │
-                                                   └─────────────────────────┘
+                                                    │  Python worker          │
+                                                    │  (separate service)     │
+                                                    │  ingestion (Phase 3) +  │
+                                                    │  analysis (Phase 4) →   │
+                                                    │  parked at analyzing →  │
+                                                    │  rendering (Phase 5A):  │
+                                                    │  cut/reframe/encode,    │
+                                                    │  verify, upload clips,  │
+                                                    │  DB-guarded completed   │
+                                                    └─────────────────────────┘
  ```
 
 Responsibilities of each component are detailed in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
@@ -150,7 +156,11 @@ Copy `.env.example` to `.env.local` and fill in what applies. **Never commit rea
  | `WORKER_CONCURRENCY` | worker | Concurrent jobs (default 2; 1-16) |
  | `WORKER_JOB_LEASE_SECONDS` | worker | Claimed-job lease (default 300; 30-3600) |
  | `WORKER_MAX_ATTEMPTS` | worker | Reference retry budget (DB `jobs.max_attempts` is authoritative, default 3) |
- | `WORKER_REQUEST_TIMEOUT_SECONDS` | worker | Request timeout (0 < value ≤ 300) |
+  | `WORKER_REQUEST_TIMEOUT_SECONDS` | worker | Request timeout (0 < value ≤ 300) |
+  | `WORKER_FFMPEG_PATH` / `WORKER_FFPROBE_PATH` | worker | FFmpeg/FFprobe binary locations (default `ffmpeg` / `ffprobe`) |
+  | `WORKER_RENDER_CONCURRENCY` | worker | Clips rendered in parallel per job (default 2; 1-8) |
+  | `WORKER_RENDER_TIMEOUT_SECONDS` | worker | Wall-clock budget for one clip render (default 900; ≤ 7200) |
+  | `WORKER_MAX_CLIP_SIZE_BYTES` | worker | Reject a rendered clip larger than this (default 200 MiB) |
 
 Server-side validation is implemented in `src/lib/env.ts` (zod) and
 `worker/app/config/settings.py` (Pydantic).
@@ -159,28 +169,33 @@ Server-side validation is implemented in `src/lib/env.ts` (zod) and
 
 1. Create a **development** Supabase project (free tier is fine).
 2. Store the project URL and keys in your environment (see table above).
- 3. Apply the five migrations to the development project (Supabase dashboard
+  3. Apply the six migrations to the development project (Supabase dashboard
     SQL editor or Supabase CLI), in order:
     - `supabase/migrations/20261113000000_initial_schema.sql` (Phase 1)
     - `supabase/migrations/20261114000000_phase2_job_settings_and_session_lookup.sql` (Phase 2)
     - `supabase/migrations/20261115000000_phase3_queue_and_ingestion.sql` (Phase 3 — queue columns, 9-state machine, restricted worker RPCs)
     - `supabase/migrations/20261115000001_phase3_storage_buckets.sql` (Phase 3 — private storage buckets; Supabase-specific)
     - `supabase/migrations/20261116000000_phase4_clip_analysis.sql` (Phase 4 — clip score/scoring columns, stage-aware queue RPCs, `analyzing` parked state)
+    - `supabase/migrations/20261117000000_phase5_rendering.sql` (Phase 5 — `jobs.render_attempts` budget, `rendering` stage in the queue RPCs, `complete_job_rendering` guard, clips index)
 
-All five are executed and asserted against a real PostgreSQL 16 engine (WASM)
+All six are executed and asserted against a real PostgreSQL 16 engine (WASM)
 in the test suite (`tests/database/rls.test.ts`, `tests/database/queue.test.ts`,
-`tests/database/phase4-queue.test.ts`, `tests/database/storage-buckets.test.ts`),
+`tests/database/phase4-queue.test.ts`, `tests/database/storage-buckets.test.ts`,
+`tests/database/phase5-rendering.test.ts`),
 including deny-by-default RLS, the queue RPCs' atomicity/lease semantics, the
-Phase 4 stage transitions (incl. crash recovery and the parked state), and the
-private-bucket configuration.
+Phase 4 stage transitions (incl. crash recovery and the parked state), the
+Phase 5 rendering lifecycle (parked claim → rendering, render-retry requeue,
+crash recovery, the `complete_job_rendering` guard refusing early completion)
+and the private-bucket configuration.
 
 Tables: `processing_sessions`, `jobs`, `clips` — all with RLS enabled and no
 anonymous policies (access is mediated exclusively by the server-side API).
 Storage buckets: `clipforge-sources` (original uploads) and `clipforge-clips`
-(rendered output, Phases 5-6) — both **private**, no client policies,
-service-role-only access. No migrations are applied to any production
-database by this project, and none of the live-verification above was run
-against a real Supabase project in this repository (no credentials provided).
+(rendered clips, `clips/{job_id}/{clip_id}.mp4`, written by the Phase 5A
+worker) — both **private**, no client policies, service-role-only access.
+No migrations are applied to any production database by this project, and
+none of the live-verification above was run against a real Supabase project
+in this repository (no credentials provided).
 
 ## Access code setup (Phase 2)
 
@@ -223,12 +238,23 @@ providers (honest unavailability, factory routing, guarded real-Whisper smoke
 test, word-level timestamps, chunk splitting + midpoint-ownership merge), clip
 detection (60-180s band, sentence boundaries, overlap control, determinism,
 honest no-clip failures) and explainable scoring (5 weighted criteria with
-reasons)**, ingestion lifecycle (download failure, permanent vs transient
-errors, lease-loss abort, temp cleanup), **analysis lifecycle (happy path to
-parked, crash recovery, no-audio / no-speech / no-clips / unavailable-provider
-permanent failures, transient storage/transcription/persistence failures,
-ownership-loss abort, temp cleanup)**, worker loop (stage-aware dispatch,
-backoff, graceful shutdown) (worker).
+reasons), rendering profiles (rotation normalization, cover/contain
+geometry), **FFmpeg output contract (real FFmpeg/FFprobe: portrait /
+landscape / square / rotated sources → exact 1080x1920 H.264+AAC+yuv420p,
+rotation baked to zero, corrupt input, timeout kills the subprocess,
+cancellation cleans up)**, clip store and clip uploads (path-shape
+validation, size cap, upsert idempotency), ingestion lifecycle (download
+failure, permanent vs transient errors, lease-loss abort, temp cleanup),
+**analysis lifecycle (happy path to parked, crash recovery, no-audio /
+no-speech / no-clips / unavailable-provider permanent failures, transient
+storage/transcription/persistence failures, ownership-loss abort, temp
+cleanup)** and **rendering lifecycle (full success + upload, resume skipping
+`ready` clips, no-clips permanent failure, download / FFmpeg / validation /
+upload / persistence failures, lease renewal loss, cancellation, progress
+and completion refusals, sibling cancellation on first clip error,
+idempotent retry without duplicate uploads)**, worker loop (stage-aware
+dispatch incl. Phase 5 rendering, missing-renderer safe release, backoff,
+graceful shutdown) (worker).
 
 The media tests generate their synthetic videos on the fly (no binary fixtures
 committed). They use `ffprobe`/`ffmpeg` from PATH, or the npm statics
@@ -261,23 +287,24 @@ pull requests:
  | Worker ingestion (claim → download → FFprobe validation → `ready`) | **Done** (bounded concurrency, lease renewal, graceful shutdown) |
  | YouTube source provider | **Interface only** — no authorized provider ships with the repo; creation returns a clear 503, uploads are unaffected. No unauthorized downloader exists or may be added |
  | Worker analysis: audio extraction + local Whisper transcription + clip detection/scoring | **Done** (optional `faster-whisper` dependency; honest `transcription_unavailable` failure when not installed; word-level timestamps; 60-180s windows; explainable scores persisted to `clips`) |
- | Jobs parked at `analyzing` with detected clips (rendering = Phase 5) | **Done** (stage-aware queue; crash recovery; bounded retries) |
- | Clip rendering / subtitles / downloads | **Not implemented** (Phases 5-6) |
+  | Jobs parked at `analyzing` with detected clips | **Done** (stage-aware queue; crash recovery; bounded retries) |
+  | Clip rendering pipeline (Phase 5A): claim parked → render cut/reframe/encode to 1080x1920 H.264+AAC → validate → upload to `clipforge-clips` → DB-guarded `completed` | **Done** (rotation-correct, aspect-ratio-preserving; resume + bounded render retries; no false `completed` possible) |
+  | Subtitle burn-in / downloads | **Not implemented** (Phase 5b / Phase 6) |
 
 ## Known limitations
 
-- **No live Supabase project was used in this phase.** The migrations and the
+- **No live Supabase project has been used so far.** The migrations and the
   queue/storage semantics are fully tested against a real PostgreSQL engine
   (WASM), but nothing has been applied to a live project — none was provided.
-  End-to-end upload → queue → worker ingestion therefore still requires:
-  creating/applying the four migrations to a verified development project,
-  setting the service-role credentials, and running the worker. Until then,
-  the app runs Phase 1-2 behavior and upload creation returns a clear error
-  when Supabase is not configured.
-- Jobs end ingestion at `ready` and end Phase 4 **parked at `analyzing`**:
-  the audio is transcribed and the detected clips (with explainable scores)
-  are persisted, but nothing is rendered yet (Phase 5), so the Results page
-  shows placeholder data until Phases 5-6 (downloads not implemented).
+  End-to-end upload → queue → worker ingestion → rendering therefore still
+  requires: creating/applying the six migrations to a verified development
+  project, setting the service-role credentials, and running the worker.
+  Until then, the app runs Phase 1-2 behavior and upload creation returns a
+  clear error when Supabase is not configured.
+- Phase 5A renders clips but does NOT yet burn in subtitles (that is Phase
+  5b) and the Results page still shows placeholder data: rendered clips are
+  stored in the private `clipforge-clips` bucket (object verified in tests,
+  never exposed publicly) but there is no download API yet (Phase 6).
 - Transcription runs locally with the **optional** `faster-whisper`
   dependency (`worker/requirements-optional.txt`). Without it the worker
   starts normally and analysis jobs fail with a clear permanent

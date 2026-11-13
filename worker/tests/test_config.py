@@ -170,3 +170,35 @@ def test_audio_settings_bounds():
         Settings(audio_extract_timeout_seconds=0)
     with pytest.raises(ValidationError):
         Settings(audio_extract_timeout_seconds=3601)
+
+
+def test_phase5_rendering_defaults_are_safe():
+    settings = Settings()
+    assert settings.render_concurrency == 2
+    assert settings.render_timeout_seconds == 900.0
+    assert settings.max_clip_size_bytes == 200 * 1024 * 1024
+
+
+def test_phase5_env_vars_are_picked_up(monkeypatch):
+    monkeypatch.setenv("WORKER_RENDER_CONCURRENCY", "4")
+    monkeypatch.setenv("WORKER_RENDER_TIMEOUT_SECONDS", "1200")
+    monkeypatch.setenv("WORKER_MAX_CLIP_SIZE_BYTES", str(500 * 1024 * 1024))
+    settings = Settings()
+    assert settings.render_concurrency == 4
+    assert settings.render_timeout_seconds == 1200.0
+    assert settings.max_clip_size_bytes == 500 * 1024 * 1024
+
+
+def test_render_settings_bounds():
+    with pytest.raises(ValidationError):
+        Settings(render_concurrency=0)
+    with pytest.raises(ValidationError):
+        Settings(render_concurrency=9)
+    assert Settings(render_concurrency=1).render_concurrency == 1
+    assert Settings(render_concurrency=8).render_concurrency == 8
+    with pytest.raises(ValidationError):
+        Settings(render_timeout_seconds=0)
+    with pytest.raises(ValidationError):
+        Settings(render_timeout_seconds=7201)
+    with pytest.raises(ValidationError):
+        Settings(max_clip_size_bytes=0)

@@ -127,3 +127,109 @@ def synthetic_videos(ffmpeg_bin: str, tmp_path_factory) -> dict[str, Path]:
     videos["empty"] = empty
 
     return videos
+
+
+def patch_mp4_rotation(path: Path, degrees: int = 90) -> None:
+    """Injects a ``rot `` box (value = degrees/16) into the video track of an
+    MP4 — the same atom phones write for rotated captures.
+
+    ffmpeg >= 5 no longer honours ``-metadata rotate=`` on (re)mux, and
+    older ffprobe (4.x) does not expose side data in JSON, so the rotation
+    tag is written directly. Safe only when ``moov`` is the LAST top-level
+    box (no ``-movflags +faststart``): the 12-byte insertion grows the box
+    sizes without shifting ``mdat`` (so ``stco`` offsets stay valid).
+    """
+    import struct
+
+    data = bytearray(path.read_bytes())
+
+    def boxes(buf, start, end):
+        pos = start
+        while pos + 8 <= end:
+            size = int.from_bytes(buf[pos:pos + 4], "big")
+            box_type = bytes(buf[pos + 4:pos + 8])
+            if size < 8:
+                return
+            yield pos, size, box_type
+            pos += size
+
+    containers = {b"moov", b"trak", b"mdia", b"minf", b"stbl", b"udta", b"edts"}
+
+    def contains(buf, start, end, name):
+        for pos, size, box_type in boxes(buf, start, end):
+            if box_type == name:
+                return True
+            if box_type in containers and size > 8 and contains(buf, pos + 8, pos + size, name):
+                return True
+        return False
+
+    top = list(boxes(data, 0, len(data)))
+    if not any(t == b"ftyp" for _p, _s, t in top):
+        raise ValueError("not an MP4 file")
+    moovs = [(p, s) for p, s, t in top if t == b"moov"]
+    if not moovs:
+        raise ValueError("no moov box")
+    moov_pos, moov_size = moovs[0]
+    last_end = max((p + s) for p, s, _t in top)
+    if moov_pos + moov_size < last_end:
+        raise ValueError("moov is not the last box (faststart file); refusing to patch")
+
+    target = None
+    for trak_pos, trak_size, _t in boxes(data, moov_pos + 8, moov_pos + moov_size):
+        if not contains(data, trak_pos + 8, trak_pos + trak_size, b"vmhd"):
+            continue
+        mdias = [(p, s) for p, s, t in boxes(data, trak_pos + 8, trak_pos + trak_size) if t == b"mdia"]
+        assert mdias, "video track without mdia"
+        target = (moov_pos, trak_pos, mdias[0][0])
+        break
+    if target is None:
+        raise ValueError("no video track")
+
+    moov_pos, trak_pos, mdia_pos = target
+    atom = struct.pack(">I4sI", 12, b"rot ", degrees * 16)
+    insert_at = mdia_pos + 8
+    data[insert_at:insert_at] = atom
+    for pos in (moov_pos, trak_pos, mdia_pos):
+        struct.pack_into(">I", data, pos, int.from_bytes(data[pos:pos + 4], "big") + len(atom))
+    path.write_bytes(bytes(data))
+
+
+@pytest.fixture(scope="session")
+def render_media(ffmpeg_bin: str, tmp_path_factory) -> dict[str, Path]:
+    """Generates the Phase 5 orientation matrix once per session.
+
+    - ``landscape``: 1920x1080 @30, 6s, H.264+AAC
+    - ``portrait``: 720x1280 @30, 6s, H.264+AAC
+    - ``square``: 640x640 @30, 6s, H.264+AAC
+    - ``rotated``: the landscape clip with a ``rot `` box (90°) injected —
+      the file stores 1920x1080 frames but DISPLAYS as 1080x1920 portrait
+      (the phone-camera case).
+    """
+    out_dir = tmp_path_factory.mktemp("render-media")
+    media: dict[str, Path] = {}
+
+    def make(name: str, size: str) -> None:
+        _run_ffmpeg(
+            ffmpeg_bin,
+            [
+                "-f", "lavfi", "-i", f"testsrc=duration=6:size={size}:rate=30",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=6",
+                "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-shortest",
+                str(out_dir / name),
+            ],
+        )
+
+    make("landscape.mp4", "1920x1080")
+    media["landscape"] = out_dir / "landscape.mp4"
+    make("portrait.mp4", "720x1280")
+    media["portrait"] = out_dir / "portrait.mp4"
+    make("square.mp4", "640x640")
+    media["square"] = out_dir / "square.mp4"
+
+    rotated = out_dir / "rotated.mp4"
+    rotated.write_bytes(media["landscape"].read_bytes())
+    patch_mp4_rotation(rotated, 90)
+    media["rotated"] = rotated
+
+    return media

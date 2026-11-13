@@ -1,10 +1,11 @@
-"""Worker loop (Phase 3 ingestion + Phase 4 analysis).
+"""Worker loop (Phase 3 ingestion + Phase 4 analysis + Phase 5 rendering).
 
 - Polls the queue and claims jobs atomically via the restricted RPC
-  (stage-aware: queued → validating, ready → transcribing, expired active
-  stages recovered in place).
+  (stage-aware: queued → validating, ready → transcribing, PARKED analyzing
+  → rendering, expired active stages recovered in place).
 - Dispatches by the claimed stage: ``validating`` → ingestion processor,
-  ``transcribing``/``analyzing`` → analysis processor.
+  ``transcribing``/``analyzing`` → analysis processor, ``rendering`` →
+  rendering processor.
 - Bounded concurrency (asyncio semaphore).
 - Lease renewal happens inside each job's processing task.
 - Exponential backoff on consecutive claim failures (transport errors).
@@ -25,6 +26,7 @@ from typing import Optional
 from .config.settings import Settings
 from .processors.analysis import AnalysisProcessor, is_analysis_stage
 from .processors.ingestion import IngestionProcessor
+from .processors.rendering import RenderProcessor, is_rendering_stage
 from .queue.supabase_queue import QueueError, SupabaseQueue
 from .storage.supabase_storage import SupabaseStorage
 
@@ -39,11 +41,13 @@ class IngestionWorker:
         storage: SupabaseStorage,
         analysis: Optional[AnalysisProcessor] = None,
         ingestion: Optional[IngestionProcessor] = None,
+        rendering: Optional[RenderProcessor] = None,
     ) -> None:
         self._settings = settings
         self._queue = queue
         self._ingestion = ingestion or IngestionProcessor(settings, queue, storage)
         self._analysis = analysis
+        self._rendering = rendering
         self._worker_id = f"{platform.node() or 'worker'}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self._semaphore = asyncio.Semaphore(settings.concurrency)
         self._active: set[asyncio.Task] = set()
@@ -123,24 +127,26 @@ class IngestionWorker:
                 pass
 
     def _processor_for(self, job: dict):
-        """Stage-aware dispatch (Phase 4): validating → ingestion,
-        transcribing/analyzing → analysis."""
-        if is_analysis_stage(str(job.get("status") or "")):
-            if self._analysis is None:
-                return None
+        """Stage-aware dispatch (Phases 3-5): validating → ingestion,
+        transcribing/analyzing → analysis, rendering → rendering."""
+        status = str(job.get("status") or "")
+        if is_analysis_stage(status):
             return self._analysis
+        if is_rendering_stage(status):
+            return self._rendering
         return self._ingestion
 
     async def _guarded(self, job: dict) -> None:
         async with self._semaphore:
             processor = self._processor_for(job)
             if processor is None:
-                # Analysis-stage job but no analysis capability in this
-                # build: release gracefully (back to ready) instead of
-                # failing — another worker may handle it.
+                # Analysis/rendering-stage job but no such capability in this
+                # build: release gracefully (back to the stage entry point:
+                # ready for analysis, parked analyzing for rendering) instead
+                # of failing — another worker may handle it.
                 released = await self._queue.release_job(str(job["id"]), self._worker_id)
-                logger.warning("job %s: no analysis processor — released (%s)",
-                               job.get("id"), "ok" if released else "not_owner")
+                logger.warning("job %s: no processor for stage %r — released (%s)",
+                               job.get("id"), job.get("status"), "ok" if released else "not_owner")
                 return
             processing_task = asyncio.current_task()
             try:

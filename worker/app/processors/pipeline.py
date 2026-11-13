@@ -1,8 +1,10 @@
 """Processing pipeline stage definitions.
 
-Phase 1 only declares the stage order. The actual stage handlers
-(source fetch, transcription, analysis, rendering) are implemented in
-Phases 3-5; ``handler`` stays ``None`` until then.
+The stage order is declared here; the actual stage handlers live in the
+processors: ingestion (validating, Phase 3), analysis
+(transcribing/analyzing, Phase 4), rendering (rendering, Phase 5 — base
+pipeline without subtitle burn-in yet; that is Phase 5b). ``handler`` stays
+``None``: dispatch is done by the worker, not this table.
 """
 
 from __future__ import annotations

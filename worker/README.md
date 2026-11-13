@@ -17,17 +17,32 @@ Whisper-compatible engine (word-level timestamps, controlled chunking for
 long recordings), detects complete-idea clip windows within the requested
 60-180s duration, scores them with an explainable 5-criterion ranking, and
 persists the clips (score + per-criterion reasons) into `clips`. The job then
-**parks at `analyzing`** (lock cleared, not claimable) — the Phase 5 renderer
-picks it up. The worker never marks a job `completed`.
+**parks at `analyzing`** (lock cleared, not claimable as analysis).
+
+Phase 5A adds the **rendering pipeline**: the stage-aware claim also picks
+up parked `analyzing` jobs (render budget available) and moves them to
+`rendering`. The worker re-downloads the verified source, cuts each detected
+window with a managed FFmpeg subprocess (rotation-correct,
+aspect-ratio-preserving reframe to exact 1080x1920 H.264 + AAC), validates
+every rendered file against a strict output contract (container, codecs,
+resolution, pixel format, zero rotation, duration tolerance), upserts it to
+the private `clipforge-clips` bucket at `clips/{job_id}/{clip_id}.mp4`,
+marks the clip `ready` with its storage path, and completes the job ONLY via
+the `complete_job_rendering` RPC — which the database enforces (it refuses
+unless every clip is `ready` with a stored object). Transient rendering
+failures requeue to the parked state (dedicated `render_attempts` budget);
+resumes skip clips already `ready`. Subtitle burn-in is Phase 5b. The worker
+never marks a job `completed` on its own.
 
 ## Storage model — read this first
 
 **Supabase Storage is the durable source of truth.** The worker's local disk
 (`WORKER_STORAGE_ROOT`) is a processing scratchpad only: each job downloads
-its source to `tmp/{job_id}/`, and that directory is deleted on every path —
-success, failure or cancellation. Nothing durable is written to local disk.
-(Phases 4-5 write rendered clips to the `clipforge-clips` bucket, not to the
-volume.)
+its source (and renders its clip files) into `tmp/{job_id}/`, and that
+directory is deleted on every path — success, failure or cancellation.
+Nothing durable is written to local disk. Phase 5A writes each rendered clip
+to the `clipforge-clips` bucket (`clips/{job_id}/{clip_id}.mp4`, upsert)
+before the temp file is removed.
 
 ## Requirements
 
@@ -35,7 +50,7 @@ volume.)
 - `ffprobe` (and `ffmpeg`, used by tests to generate synthetic fixtures) on
   the host or in the image — or set `WORKER_FFPROBE_PATH` /
   `WORKER_FFMPEG_PATH`. The Docker image installs them via apt.
-- The Phase 3 **and 4** database migrations applied to the same Supabase
+- The Phase 3, 4 **and 5** database migrations applied to the same Supabase
   project (queue RPCs are granted to `service_role`).
 
 ### Transcription engine (Phase 4, optional but required to produce clips)
@@ -132,17 +147,27 @@ startup (see `app/config/settings.py`):
 | `WORKER_FFPROBE_TIMEOUT_SECONDS` | `60` | Probe timeout (0 < x ≤ 600) |
 | `WORKER_REQUEST_TIMEOUT_SECONDS` | `30` | Must be > 0 and ≤ 300 |
 | `WORKER_WORKER_ENABLED` | `true` | Set `false` for API-only deployments |
+| `WORKER_RENDER_CONCURRENCY` | `2` | Clips rendered in parallel per job (1-8); each clip is one FFmpeg subprocess |
+| `WORKER_RENDER_TIMEOUT_SECONDS` | `900` | Wall-clock budget for one clip render (0 < x ≤ 7200); the subprocess is killed and awaited after it |
+| `WORKER_MAX_CLIP_SIZE_BYTES` | `209715200` (200 MiB) | A rendered clip larger than this is rejected (not uploaded) |
 
-## Queue contract (Phase 3)
+## Queue contract (Phases 3-5)
 
-All queue traffic goes through the restricted, `SECURITY DEFINER` RPCs from
-migration `20261115000000` (`claim_next_job`, `renew_job_lease`,
-`update_job_progress`, `complete_job_ingestion`, `fail_job`, `release_job`).
-They are revoked from PUBLIC and granted to `service_role` only; every update
-is scoped to the calling worker's lease, so two workers can never own the
-same active job. Expired leases make crashed jobs reclaimable (crash
-recovery). The worker renews each job's lease while processing and aborts
-safely (no stale state writes) when a renewal is rejected.
+All queue traffic goes through the restricted, `SECURITY DEFINER` RPCs
+(`claim_next_job`, `renew_job_lease`, `update_job_progress`,
+`complete_job_ingestion`, `complete_job_rendering`, `fail_job`,
+`release_job`), extended stage by stage in migrations
+`20261115000000` / `20261116000000` / `20261117000000` with **unchanged
+signatures** (backward compatible). They are revoked from PUBLIC and granted
+to `service_role` only; every update is scoped to the calling worker's
+lease, so two workers can never own the same active job. Expired leases make
+crashed jobs reclaimable (crash recovery). The worker renews each job's lease
+while processing and aborts safely (no stale state writes) when a renewal is
+rejected. Since Phase 5, the claim also picks up parked `analyzing` jobs
+(→ `rendering`), rendering retries consume the dedicated
+`jobs.render_attempts` budget (bounded by `max_attempts`), and
+`complete_job_rendering` is the ONLY path to `completed` in rendering — it
+refuses unless every clip is `ready` with a `storage_path`.
 
 ## Docker
 
@@ -165,8 +190,9 @@ worker/app/
 ├── processors/    # Ingestion processor (Phase 3) + pipeline stage order (4-5)
 ├── transcription/ # Whisper adapter contract (Phase 4)
 ├── ai/            # Clip detection contract (Phase 4)
-├── rendering/     # FFmpeg renderer contract (Phase 5)
-├── storage/       # Private Supabase Storage download + local path utilities
+├── rendering/     # FFmpeg renderer (Phase 5A): profiles, subprocess lifecycle,
+│                  #   rotation-aware cut/reframe, FFprobe output-contract validation
+├── storage/       # Private Supabase Storage download + clip upload + local path utilities
 ├── validation/    # FFprobe media validation (container/streams/limits)
 ├── worker.py      # Ingestion loop (claim, concurrency, backoff, shutdown)
 └── config/        # Settings + structured logging

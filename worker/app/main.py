@@ -2,7 +2,9 @@
 
 Phase 3: serves the health/heartbeat API and runs the ingestion worker loop
 (claim → download → FFprobe validation → ready) alongside it via FastAPI
-lifespan. Video processing runs ONLY in this worker, never on Vercel.
+lifespan. Phase 4 adds transcription + clip analysis; Phase 5 adds clip
+rendering (parked jobs → vertical clips → storage → completed). Video
+processing runs ONLY in this worker, never on Vercel.
 """
 
 from __future__ import annotations
@@ -26,13 +28,20 @@ def build_worker(settings: Settings):
     model configured the factory returns the honest "unavailable"
     provider — analysis jobs then fail with a clear permanent error
     instead of fabricating results.
+
+    Phase 5: the worker also builds the rendering path (FFmpeg renderer +
+    RenderProcessor). Rendering claims parked jobs and completes them only
+    when every clip is rendered AND stored (DB-enforced).
     """
     if not (settings.worker_enabled and settings.supabase_configured):
         return None
     from supabase import create_async_client
 
     from .processors.analysis import AnalysisProcessor
+    from .processors.rendering import RenderProcessor
     from .queue.supabase_queue import SupabaseQueue
+    from .rendering.profiles import RenderProfile
+    from .rendering.renderer import FFmpegRenderer
     from .storage.clip_store import SupabaseClipStore
     from .storage.supabase_storage import SupabaseStorage
     from .transcription.factory import build_transcription_provider
@@ -40,11 +49,20 @@ def build_worker(settings: Settings):
 
     client = create_async_client(settings.supabase_url, settings.supabase_service_role_key)
     queue = SupabaseQueue(client)
-    storage = SupabaseStorage(client, settings.max_upload_size_bytes)
+    storage = SupabaseStorage(client, settings.max_upload_size_bytes, max_clip_bytes=settings.max_clip_size_bytes)
     transcriber = build_transcription_provider(settings)
     clip_store = SupabaseClipStore(client)
     analysis = AnalysisProcessor(settings, queue, storage, transcriber, clip_store)
-    return IngestionWorker(settings, queue, storage, analysis=analysis)
+    profile = RenderProfile()
+    renderer = FFmpegRenderer(
+        settings.ffmpeg_path,
+        settings.ffprobe_path,
+        profile=profile,
+        timeout_seconds=settings.render_timeout_seconds,
+        probe_timeout_seconds=settings.ffprobe_timeout_seconds,
+    )
+    rendering = RenderProcessor(settings, queue, storage, clip_store, renderer)
+    return IngestionWorker(settings, queue, storage, analysis=analysis, rendering=rendering)
 
 
 def create_app(settings: Optional[Settings] = None) -> FastAPI:
@@ -78,7 +96,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app = FastAPI(
         title="ClipForge AI Worker",
         version=settings.version,
-        description="Video processing worker for ClipForge AI (Phase 3: ingestion queue + validation; Phase 4: transcription + clip analysis).",
+        description="Video processing worker for ClipForge AI (Phase 3: ingestion queue + validation; Phase 4: transcription + clip analysis; Phase 5: clip rendering).",
         lifespan=lifespan,
     )
     app.state.settings = settings
