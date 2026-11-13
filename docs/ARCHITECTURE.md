@@ -440,11 +440,14 @@ tested, including the interruption→resume definition-of-done test (zero
 reprocessing, final state identical to a clean run). Sources come through
 the `app/providers` registry: upload (fully implemented), YouTube/Twitch
 (validation-only — they refuse materialization explicitly rather than claim
-support). The renderer additionally picks the output rate from the MEASURED
-source fps (`select_output_fps`: ≥55 → 60, else 30; no frame duplication).
-In-loop integration (the `AnalysisProcessor` hook + a queue-side
-"incomplete → continue later" transition) is deliberately the NEXT task —
-see `docs/stream-intelligence.md` §11.
+support). The renderer additionally renders at the MEASURED source fps
+(`select_output_fps`: the source rate is preserved — fractional NTSC
+included — capped at `WORKER_RENDER_FPS_HIGH`; no frame duplication, no
+silent clamping in 23.976…60). In-loop integration is DELIVERED (Phase
+7b): `AnalysisProcessor` runs the pipeline as the primary analysis path,
+incomplete runs requeue via `requeue_incomplete_analysis` + the dedicated
+`analysis_resumes` counter (no `attempt_count` burn), and crash recovery
+replays only missing chunks — see `docs/stream-intelligence.md` §11–12.
 
 ## Job state machine
 

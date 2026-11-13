@@ -80,10 +80,12 @@ gone; the size cap remains as the disk bound):
   explicitly — no support is claimed without an authorized path), upload
   fully implemented (probe + injected bounded download). No yt-dlp, no DRM
   bypass, no network guessing.
-- **Source-aware frame rate**: the renderer measures the source's average
-  fps and renders ≥55 fps sources at 60 (`WORKER_RENDER_FPS_HIGH`);
-  everything else keeps the 30 fps profile default — frames are never
-  duplicated to fake a rate.
+- **Source-preserved frame rate**: the renderer measures the source's
+  average fps and renders at that rate — fractional NTSC included
+  (23.976/29.97/55/59.94) — capped at `WORKER_RENDER_FPS_HIGH` (60); the
+  output never exceeds the measured rate, so frames are never duplicated
+  to fake a rate and nothing in 23.976…60 is silently clamped. Unknown
+  rates keep the 30 fps profile default.
 - **Benchmarks** (`worker/benchmarks/`, `python -m benchmarks.run`): a
   deterministic synthetic fixture with ground-truth events; JSON report
   separating measured from targets. Synthetic ≠ real-world accuracy —
@@ -247,14 +249,15 @@ startup (see `app/config/settings.py`):
 | `WORKER_RENDER_CONCURRENCY` | `2` | Clips rendered in parallel per job (1-8); each clip is one FFmpeg subprocess |
 | `WORKER_RENDER_TIMEOUT_SECONDS` | `900` | Wall-clock budget for one clip render (0 < x ≤ 7200); the subprocess is killed and awaited after it |
  | `WORKER_MAX_CLIP_SIZE_BYTES` | `209715200` (200 MiB) | A rendered clip larger than this is rejected (not uploaded) |
- | `WORKER_RENDER_FPS_LOW` / `WORKER_RENDER_FPS_HIGH` | `30` / `60` | Source-aware output rate: a source ≥ the threshold renders at HIGH, else LOW (no frame duplication) |
- | `WORKER_RENDER_FPS_HIGH_SOURCE_THRESHOLD` | `55` | Measured source fps at/above which the HIGH rate applies |
+ | `WORKER_RENDER_FPS_LOW` / `WORKER_RENDER_FPS_HIGH` | `30` / `60` | Source-preserved output rate: the measured source rate is kept (fractional included) and capped at HIGH; LOW is the fallback only when the rate is unmeasurable (no frame duplication) |
+ | `WORKER_RENDER_FPS_HIGH_SOURCE_THRESHOLD` | `55` | Retained for settings compatibility; the source-preserved selection no longer uses it |
  | `WORKER_INTEL_CHUNK_SECONDS` | `600` | Analysis chunk length (operational bound, NOT a duration cap) (60-3600) |
  | `WORKER_INTEL_OVERLAP_SECONDS` | `30` | Chunk overlap keeping boundary events whole (0 ≤ x < chunk) |
  | `WORKER_INTEL_CHUNKS_PER_CLAIM` | `20` | Chunks one invocation processes before returning `incomplete` (resume next claim) (1-1000) |
  | `WORKER_INTEL_SCENE_THRESHOLD` | `0.3` | ffmpeg scene-score cut threshold (0.05 < x ≤ 0.95) |
  | `WORKER_INTEL_CHUNK_TIMEOUT_SECONDS` | `300` | Per-chunk decode / visual-pass budget; the subprocess is killed after it |
  | `WORKER_INTEL_REQUESTED_CLIPS` | `5` | Default number of ranked candidate clips (1-25) |
+ | `WORKER_INTEL_MAX_RESUMES` | `100000` | Resume requeues allowed before a permanent `intel_resume_exhausted` failure (resumes never consume the job's `attempt_count` retry budget) |
 | `WORKER_CAPTION_FONT_FAMILY` | `DejaVu Sans` | libass font family (fontconfig-resolved; no markup characters) |
 | `WORKER_CAPTION_FONT_SIZE` | `88` | Glyph size in PlayRes pixels (24-200) |
 | `WORKER_CAPTION_BASE_COLOR` | `FFFFFF` | Spoken-word color (RRGGBB) — ASS PrimaryColour |

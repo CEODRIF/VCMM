@@ -50,14 +50,13 @@ chosen architecture (sections 2-8) BEFORE any major code change.
 
 ### 1.3 What this task deliberately does NOT do (scope honesty)
 
-- **No in-loop claim-integration yet.** The intel pipeline is a complete,
-  standalone, checkpointed orchestrator with a clean seam (a progress
-  reporter + the existing stores). Wiring it into `AnalysisProcessor`
-  needs a park/requeue design for "incomplete, continue later" that must
-  not collide with the Phase 5A parked-`analyzing`→rendering claim. That
-  integration is the documented next step (§8); half-wiring it now would
-  risk the working Phase 4-6 paths, which the task forbids without
-  demonstrated need.
+- **In-loop claim integration — DELIVERED (Phase 7b, §11).** Originally
+  deferred here because it needed a queue-side "incomplete, continue
+  later" transition that must not collide with the Phase 5A
+  parked-`analyzing`→rendering claim. That design is now implemented
+  (`requeue_incomplete_analysis` + the dedicated `analysis_resumes`
+  counter, following the Phase 5 `render_attempts` precedent) and
+  integration-tested.
 - **No facecam/expression ML, no OCR, no HUD parsers** — these require
   model weights/paid or heavy dependencies. They exist as typed,
   tested **interfaces** with honest null implementations (the scorer
@@ -212,17 +211,26 @@ all defaults documented):
   cap. **No virality claims** — scores are "estimated engagement
   potential" from measured evidence only.
 
-## 7. Rendering (one targeted fix + contract)
+## 7. Rendering (source-rate preservation + contract)
 
-- `probe_media`/renderer now measures the source **frame rate**;
-  `select_output_fps(source_fps)` → 60 when source ≥ 55 fps, else 30
-  (configurable `WORKER_RENDER_FPS_HIGH/LOW`). A 30 fps source is never
-  upsampled; a 60 fps source is no longer downsampled. Output contract
-  (FFprobe) accepts 30 or 60 accordingly.
+- `probe_media`/the renderer measure the source **frame rate**;
+  `select_output_fps(source_fps)` PRESERVES the measured rate — fractional
+  NTSC included (23.976, 29.97, 55, 59.94) — capped at
+  `WORKER_RENDER_FPS_HIGH` (default 60). The output rate never exceeds the
+  measured source rate, so frames are **never duplicated to fake a higher
+  rate**, and nothing in the 23.976…60 window is silently clamped
+  (e.g. a 24 fps source renders at 24, not 30). Unknown rates fall back to
+  `WORKER_RENDER_FPS_LOW` (30). Fractional rates are passed to FFmpeg
+  exactly (`-r 59.94` → ffprobe `avg_frame_rate` = 2997/50).
+- Verified with REAL FFmpeg/ffprobe (worker integration tests over
+  23.976/24/30/55/59.94/60 fps fixtures): output `avg_frame_rate` matches
+  the source within ±0.011, **decoded frame counts** match
+  `rate × duration` (catches bulk duplication/dropping), and A/V stream
+  durations agree (≤ 50 ms) with the 1080x1920 contract intact.
 - No upscale of low-res footage is claimed as 1080p native (the cover-crop
   scale remains geometric; documentation only).
-- Everything else (rotation, captions, audio sync, upload, completion
-  guard) is untouched.
+- Everything else (rotation, captions, upload, completion guard) is
+  untouched.
 
 ## 8. Providers (`worker/app/providers/`)
 
@@ -294,16 +302,94 @@ all defaults documented):
   No other runtime dependency is added (the ZIP engine precedent:
   hand-rolled where possible).
 
-## 11. Integration seam (next step, out of scope here)
+## 11. Job-pipeline integration (Phase 7b — implemented & tested)
 
-`AnalysisProcessor` wiring requires a queue-side "incomplete, continue
-later" transition (distinct from `park_after_analysis`, which Phase 5A
-claims for rendering). The orchestrator already exposes exactly what the
-hook needs: `StreamIntelPipeline.run(job_id, source_path, total_duration,
-temp_dir, should_stop) -> PipelineResult {status: complete|incomplete,
-processed, remaining, events, candidates}`. When the transition RPC is
-designed (follow-up task), the processor calls the pipeline with the same
-lease/ownership/temp contract it already enforces; the top-N selected
-clips feed the existing clip store (60–180 s, `clips_duration_bounds`),
-and the Phase 4 transcript detector remains the fallback for jobs where the
-intel pass yields nothing.
+The pipeline is now the **PRIMARY analysis path** of every claimed job:
+`build_worker` (`app/main.py`) constructs `IntelStore` and passes it to
+`AnalysisProcessor`, which runs `StreamIntelPipeline.run(job_id,
+source_path, total_duration, temp_dir)` after the re-probe / audio check.
+The Phase 4 transcript path remains (a) the fallback for a COMPLETED intel
+run that yields no signal candidates, and (b) the entire path when
+`intel_store` is not injected (existing behavior, byte-identical).
+
+Lifecycle (every transition used was already legal in the Phase 4/5 map —
+no transition-map or lock-constraint changes):
+
+    ready ─claim─► transcribing ─► [intel run]
+        complete     ─► analyzing ─► park_after_analysis (Phase 5 renders)
+        incomplete   ─► requeue_incomplete_analysis ─► ready (resume)
+        chunk error  ─► fail_job (transient, `intel_analysis_failed`)
+                       ─► ready (next claim resumes; retries the chunk)
+        resume cap   ─► fail_job (permanent, `intel_resume_exhausted`) ─► failed
+
+- **Incomplete is not an error.** With the per-claim budget
+  (`WORKER_INTEL_CHUNKS_PER_CLAIM`), a long VOD finishes its budget,
+  checkpoints, and requeues to `ready`. The next claim resumes from
+  `processing_checkpoints` — zero reprocessing (chunks skip when `done`;
+  events upsert on `event_key`). A job is never parked/completed while
+  chunks remain.
+- **Resumes do not consume the failure budget.** The new
+  `jobs.analysis_resumes` counter (Phase 5 `render_attempts` precedent)
+  counts resume requeues; `claim_next_job`'s added branch claims a
+  `ready` job with `analysis_resumes > 0` **without** incrementing
+  `attempt_count`, so a 24 h VOD is not stranded after a few claims.
+  The cap (`WORKER_INTEL_MAX_RESUMES`, default 100 000) is enforced only
+  in `requeue_incomplete_analysis` → `resume_exhausted`, and the processor
+  then fails the job PERMANENTLY — no silent stall, no silent success.
+- **Crash recovery.** A job that dies mid-analysis is recovered by the
+  existing expired-lease claim as `analyzing`; the idempotent pipeline
+  replays only what is missing, and a job whose checkpoints are all
+  `done` resumes to "complete" with no further decoding.
+- **Ownership/lease.** Requeue/park/fail are owner-scoped; `not_owner`
+  aborts without writes; cancellation (shutdown/lease loss) performs no
+  state writes; temps are removed on every path.
+
+New migration `20261125000000_phase7b_intel_integration.sql` (additive,
+repository-only, **NOT applied to any live project**): `analysis_resumes`
+column (default 0, check ≥ 0), the `requeue_incomplete_analysis` RPC, and
+a backward-compatible `claim_next_job` re-creation (resume branch +
+conditional `attempt_count` increment; service-role-only privileges kept).
+All Phase 3–5 queue behavior is re-verified by the pglite suite (134 tests
+green, including the re-created RPC).
+
+Integration tests (real orchestration path, not isolated units):
+`worker/tests/test_intel_integration.py` (7 — candidates→persist+park,
+no-candidates→transcript fallback, incomplete→requeue→resume→park on a
+shared client, failed chunk→transient fail (never silent success),
+resume exhaustion→permanent fail, crash recovery at `analyzing`,
+`not_owner`→abandon) and `tests/database/phase7b-integration.test.ts`
+(16 — column semantics, requeue outcomes, claim resume branch incl.
+no-attempt-burn and exhausted-budget-claimable, backward compatibility,
+anon/service_role privileges).
+
+## 12. Operational limits, configuration, migrations
+
+**Limits** — no product-level duration cap; everything below is an
+explicit, configurable operational limit:
+
+| Setting (`WORKER_` prefix) | Default | Meaning |
+| --- | --- | --- |
+| `INTEL_CHUNK_SECONDS` | 600 | chunk length (s) |
+| `INTEL_OVERLAP_SECONDS` | 30 | chunk overlap (s) |
+| `INTEL_CHUNKS_PER_CLAIM` | 20 | chunks per claim — splits long VODs across claims |
+| `INTEL_CHUNK_TIMEOUT_SECONDS` | 300 | per-chunk audio decode / visual pass budget |
+| `INTEL_SCENE_THRESHOLD` | 0.3 | scene-change sensitivity |
+| `INTEL_REQUESTED_CLIPS` | 5 | clip cap fallback (the job's `requested_clips` wins) |
+| `INTEL_MAX_RESUMES` | 100000 | resume cap before a permanent failure |
+| `RENDER_FPS_LOW` | 30 | fallback rate when the source rate is unmeasurable |
+| `RENDER_FPS_HIGH` | 60 | cap for the preserved source rate |
+
+Resources: RAM bounded per chunk (audio WAV ≈ 19 MB at 600 s; fusion/
+selection input < 1 MB even for a 24 h VOD); per-chunk temp files deleted
+in `finally`; the extracted full WAV remains ≈ 30 MB/h on disk. Chunks run
+sequentially within a job; the worker semaphore bounds parallel jobs.
+
+**Migrations pending on live databases** (repository-only so far):
+`20261124000000_phase7_stream_intelligence.sql` (checkpoints/events
+tables, twitch source_type) and
+`20261125000000_phase7b_intel_integration.sql` (resume column/RPC/claim
+branch). **Neither has been applied to any live Supabase project.**
+Operational note: on a database without those tables the worker must run
+WITHOUT the `IntelStore` injection (Phase 4–6 behavior); otherwise intel
+store calls error and analysis jobs fail. Apply the migrations before
+turning on the integrated path in any environment.

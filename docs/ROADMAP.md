@@ -303,9 +303,11 @@ design: [`docs/stream-intelligence.md`](stream-intelligence.md).
   IoU-0.5 near-duplicate removal, 60–180 s product bounds, 8 heuristic
   categories (always labeled heuristic) + `unclassified`, ranked by
   (score, confidence, start).
-- **Rendering**: source-aware frame rate — a measured ≥55 fps source renders
-  at 60 (`-r 60`), everything else keeps the 30 profile default (no frame
-  duplication; the output fps is ffprobe-verified in tests). The rest of
+- **Rendering**: source-preserved frame rate — the measured source rate is
+  rendered exactly (23.976/24/30/55/59.94/60 all preserved; fractional
+  NTSC passed to `-r` unrounded), capped at 60 (no frame duplication, no
+  silent clamping inside the window; ffprobe-verified output fps, decoded
+  frame counts and A/V sync in the worker integration tests). The rest of
   the Phase 5A/5B pipeline is untouched.
 - **Providers** (`worker/app/providers/`): protocol + registry, no
   guessing. YouTube (keyless oEmbed) and Twitch (keyless Helix listing)
