@@ -30,18 +30,20 @@
                       │  + queue RPCs       │  │  clipforge-sources:        │
                       │  (service-role only)│  │   sources/{job}/original/* │
                       └─────────▲───────────┘  │  clipforge-clips:          │
-                                │              │   outputs/{job}/clips/*.mp4│
+                                │              │   clips/{job}/{clip}.mp4   │
                                 │ atomic claim └─────────────▲──────────────┘
                                 │ + lease + RPCs             │ signed-URL PUT
                                 │ (service role)             │ (browser, direct)
                       ┌─────────┴──────────────────┐  ┌──────┴───────────────┐
-                      │      Python worker         │  │        Browser       │
-                      │  claim → download →        │  │  real progress,      │
-                      │  FFprobe validate → ready  │  │  cancel, retry       │
-                      │  (ingestion, Phase 3)      │  └──────────────────────┘
-                      │  transcribe → analyze →    │
-                      │  render: Phases 4-5        │
-                      │  FFmpeg · Whisper          │
+                       │      Python worker         │  │        Browser       │
+                       │  claim → download →        │  │  real progress,      │
+                       │  FFprobe validate → ready  │  │  cancel, retry       │
+                       │  (ingestion, Phase 3)      │  └──────────────────────┘
+                       │  transcribe → analyze      │
+                       │  (Phase 4) → render        │
+                       │  (Phase 5A: cut/reframe/   │
+                       │  encode/verify/upload)     │
+                       │  FFmpeg · Whisper          │
                       │  local disk = SCRATCH ONLY │
                       │  (temp files, always       │
                       │   deleted after the job)   │
@@ -199,8 +201,9 @@ Security properties:
 - Two **private** buckets (Phase 3 migration `20261115000001`, Supabase-
   specific):
   - `clipforge-sources` — original uploads, `sources/{job_id}/original/{uuid}.{ext}`.
-  - `clipforge-clips` — rendered output, `outputs/{job_id}/clips/{clip_id}.mp4`
-    (written in Phases 5-6).
+   - `clipforge-clips` — rendered output, `clips/{job_id}/{clip_id}.mp4`
+     (written by the Phase 5A renderer; upsert, so re-renders are
+     idempotent).
 - **No client policies** on either bucket: with RLS deny-by-default, browsers
   can only ever act on (a) a signed upload URL issued server-side for exactly
   one job-owned path, or (b) a short-lived signed download URL generated
@@ -227,14 +230,14 @@ Modules and their phases:
 | Module | Responsibility | Phase |
 | --- | --- | --- |
 | `app/api` | Health endpoint + worker heartbeat | 1 / 3 (done) |
-| `app/queue` | Job models + Supabase queue client (RPC wrappers + Phase 4 guarded stage transition / parking) | 1 / 3 / 4 (done) |
-| `app/processors` | Ingestion processor (download → FFprobe → ready) + audio extraction + analysis processor (transcribe → detect → score → persist → park) | 3 / 4 (done) |
+| `app/queue` | Job models + Supabase queue client (RPC wrappers incl. `complete_job_rendering` + Phase 4 guarded stage transition / parking) | 1 / 3 / 4 / 5 (done) |
+| `app/processors` | Ingestion (download → FFprobe → ready) + audio extraction + analysis (transcribe → detect → score → persist → park) + **rendering (download → cut/reframe/encode → verify → upload → DB-guarded complete)** | 3 / 4 / 5A (done) |
 | `app/transcription` | Provider base (word-level contract) + local faster-whisper adapter (optional) + overlap chunking/merge + honest unavailability | 4 (done) |
 | `app/ai` | Sentence extraction, complete-idea window detection, explainable 5-criterion scoring | 4 (done) |
-| `app/rendering` | FFmpeg: reframe to 9:16, cut, animated subtitles, encode 1080x1920 | 5 |
-| `app/storage` | Private Supabase Storage download (path-validated, size-capped streaming) + clip persistence (job-scoped) + local path utilities | 3 / 4 (done) |
+| `app/rendering` | FFmpeg subprocess lifecycle (timeout/cancel/cleanup), rotation-aware reframe + cut to exact 1080x1920 (subtitles: 5b), FFprobe output-contract validation, render profiles | 5A (done) |
+| `app/storage` | Private Supabase Storage download + clip upload (path-shape validated, size-capped, upsert) + clip persistence (job-scoped) + local path utilities | 3 / 4 / 5 (done) |
 | `app/validation` | FFprobe media validation (container, streams, codecs, duration, size) | 3 (done) |
-| `app/config` | Pydantic settings (env-validated) + JSON structured logging | 1 / 4 |
+| `app/config` | Pydantic settings (env-validated) + JSON structured logging | 1 / 4 / 5 |
 
 Ingestion loop (Phase 3): poll → `claim_next_job` (atomic) → bounded-
 concurrency processing (semaphore) → download to temp → FFprobe validate →
@@ -248,8 +251,9 @@ clean temp files. `/health` exposes a worker heartbeat (id, active jobs,
 uptime).
 
 The worker reports state transitions and progress through the RPCs; the UI
-polls the API. The worker NEVER marks a job `completed` — `completed` is
-reserved for the finished rendering pipeline (Phase 5+).
+polls the API. The worker NEVER marks a job `completed` by direct write —
+since Phase 5A, `completed` is reachable only through the
+`complete_job_rendering` RPC, which the database enforces.
 
 Analysis lifecycle (Phase 4): the claim RPC is stage-aware — a `ready` job is
 claimed directly as `transcribing` (a `queued` job as `validating`; an active
@@ -281,6 +285,36 @@ the factory returns an `UnavailableTranscriber` whose calls raise
 `TranscriptionUnavailableError` — jobs fail permanently with a clear message
 instead of producing fabricated output.
 
+Rendering lifecycle (Phase 5A): the claim RPC is stage-aware for parked
+jobs too — a PARKED `analyzing` job whose `render_attempts < max_attempts`
+is claimed as `rendering` (an expired-lease `rendering` job is recovered in
+place, stage kept; `render_attempts` is the dedicated rendering retry budget
+because `attempt_count` is consumed by every claim). The worker dispatches
+`rendering` → rendering processor, which runs: re-download the verified
+source → re-probe → list the job's clips (resume skips clips already
+`ready`) → render the remaining windows in parallel (bounded by
+`WORKER_RENDER_CONCURRENCY`, first clip error cancels the siblings) →
+validate EVERY rendered file against the output contract (MP4 / H.264 /
+AAC / exact 1080x1920 / yuv420p / stored rotation ≤ 0.5° / duration within
+±15%) → upsert-upload to `clips/{job_id}/{clip_id}.mp4` in the private
+`clipforge-clips` bucket (path shape validated, size-capped) → mark the
+clip `ready` with its storage path → report progress (15 → 100) →
+`complete_job_rendering`. The completion RPC — the only way a job becomes
+`completed` during rendering — succeeds only when the caller owns the
+lease, the job is `rendering`, at least one clip exists and EVERY clip is
+`ready` with a non-null `storage_path`; any refusal is treated as
+"abandon, the lease recovers it". A transient rendering failure requeues to
+the parked `analyzing` state (render_attempts + 1) until the budget is
+exhausted, then `failed`; `render_invalid` (contract violation) and
+`no_clips_to_render` are permanent. Rotation is read from the MP4 `rot
+`/`dtrt` boxes directly (version-independent — old ffprobe cannot expose
+side data, recent ffmpeg ignores the boxes in `-autorotate`) and baked into
+the pixels with an explicit filter, so output always stores zero rotation.
+Same safety contract as before: per-job lease renewal with ownership-loss
+abort, cancellation without state writes, temp-dir cleanup on every path,
+one managed FFmpeg subprocess per clip (timeout → kill + await, partial
+output removed).
+
 ## Job state machine
 
 ```
@@ -290,15 +324,21 @@ ingestion (Phase 3):   uploading → queued → validating → ready
 product pipeline:      ready → transcribing → analyzing → rendering → completed
                        (any active) ─────────────────────────────────► failed
                        (Phase 4 end state: PARKED analyzing = lock cleared,
-                        not claimable; Phase 5 claims it → rendering)
+                        not claimable; the Phase 5 claim moves it → rendering)
+                       rendering ──transient fail──► analyzing (PARKED,
+                                                    render_attempts + 1)
+                       rendering → completed ONLY via complete_job_rendering
+                       (DB guard: every clip ready + stored)
 ```
 
 Legal transitions are enforced by the database trigger
 (`validate_job_status_transition`), so no API or worker bug can move a job to
 an arbitrary state. Phase 4 extends the map with `transcribing → ready`
-(transient analysis retry) and `analyzing → ready` (graceful release), and the
-lock-consistency constraint admits a parked `analyzing` row (lock cleared).
-States are defined in `src/config/app.ts` (frontend),
+(transient analysis retry) and `analyzing → ready` (graceful release); Phase 5
+adds `rendering → completed` (guarded RPC) and `rendering → analyzing`
+(rendering retry to the parked state). The lock-consistency constraint admits
+a parked `analyzing` row (lock cleared) and requires a live lease for an
+ACTIVE `rendering` row. States are defined in `src/config/app.ts` (frontend),
 `worker/app/queue/models.py` (worker) and the `jobs_status_check` constraint
 (Postgres) and kept in sync by tests on both sides.
 
@@ -340,6 +380,16 @@ States are defined in `src/config/app.ts` (frontend),
 - **Worker lease ownership**: every queue RPC update is scoped to
   `locked_by = caller`; crash recovery is via expired leases, never via
   client action. Failed jobs store a safe error category, never stack traces.
+- **Terminal completion is DB-enforced**: `completed` is reachable only via
+  the `complete_job_rendering` RPC, which refuses unless the caller owns the
+  lease, the job is `rendering`, and every clip is `ready` WITH a
+  `storage_path` — a stale or buggy worker can never mark a job completed
+  early (no code path writes `completed` directly).
+- **Clip object safety**: uploads to `clipforge-clips` are rejected unless
+  the path matches the renderer-generated shape exactly
+  (`clips/{uuid}/{uuid}.mp4` — no traversal), the file exists, is non-empty
+  and is under the configured size cap; uploads are upserts (idempotent on
+  retry).
 - **Secrets** live in environment variables only; `.env*` is gitignored;
   `.env.example` contains placeholders. Logs are structured JSON and never
   include credentials, signed URLs or raw file names beyond job ids.
@@ -392,11 +442,35 @@ Phase 4 (AI processing engine):
   score/scoring columns, stage-aware queue RPCs, transition map extension,
   parked-`analyzing` lock-consistency branch.
 
+Phase 5A (rendering foundation):
+
+- `worker/app/rendering/*` → `profiles.py` (rotation normalization +
+  cover/contain geometry plan), `ffmpeg.py` (managed subprocess: timeout /
+  cancellation / partial-output cleanup), `renderer.py` (rotation-aware
+  cut + reframe to exact 1080x1920), `validation.py` (FFprobe output
+  contract + MP4 rotation box scanner), `base.py` (`BaseRenderer` /
+  `RenderSpec` — `captions` carried for Phase 5b).
+- `worker/app/processors/rendering.py` + `worker/app/worker.py` → the
+  rendering lifecycle (see above), stage-aware dispatch
+  (`rendering` → RenderProcessor; a build without a renderer releases the
+  job back to the parked state instead of failing it).
+- `worker/app/storage/supabase_storage.py` → `upload_from` for
+  `clips/{job_id}/{clip_id}.mp4` (path-shape validated, size-capped,
+  upsert); `worker/app/storage/clip_store.py` → `list_clips` / `mark_clip`
+  scoped to `(id, job_id)` with `pending → processing → ready`.
+- `worker/app/queue/supabase_queue.py` → `complete_job_rendering` wrapper.
+- `supabase/migrations/20261117000000_phase5_rendering.sql` →
+  `jobs.render_attempts`, `rendering` stage in all queue RPCs (same
+  signatures — backward compatible), `rendering → analyzing` retry
+  transition, `complete_job_rendering` guard RPC, `clips_job_status_idx`.
+- `tests/database/phase5-rendering.test.ts` → the full Phase 5 queue
+  semantics asserted on a real PostgreSQL engine (pglite WASM).
+
 ## Remaining integration points (marked in code)
 
 | Location | Marker | Lands in |
 | --- | --- | --- |
 | `src/lib/jobs/service.ts` | `INTEGRATION POINT (authorized provider only)` | YouTube source materialization by an explicitly approved provider |
 | `src/app/results/page.tsx` | `DEVELOPMENT PLACEHOLDER DATA` | Results API |
-| `worker/app/processors/analysis.py` | `INTEGRATION POINT (Phase 5 rendering)` | Renderer claims parked `analyzing` jobs → `rendering`; clip files → `clipforge-clips` |
-| `worker/app/processors/pipeline.py` | Phase markers | Phase 5 execution |
+| `worker/app/rendering/renderer.py` | `Phase 5b` (docstring) | Subtitle burn-in from the word-level transcription |
+| `worker/app/processors/pipeline.py` | Phase markers | Phase 5b execution |

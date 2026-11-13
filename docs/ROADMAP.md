@@ -125,12 +125,58 @@ Seven phases, in order. Each phase ends with a shippable increment.
   determinism, honest failures), analysis lifecycle (all failure/ownership
   paths), Phase 4 queue semantics on a real PostgreSQL engine (pglite WASM).
 
-## Phase 5 — Rendering
+## Phase 5A — Rendering foundation ✅ (this commit)
 
-- FFmpeg pipeline: reframe to vertical 9:16, cut to start/end, encode
-  1080x1920 H.264 (30fps) (`worker/app/rendering`).
-- Modern animated subtitles burned in from the transcription (word-level).
-- Health-checked render workers; retry and failure paths update `jobs`/`clips`.
+- **Queue** (migration `20261117000000`): the claim RPC now also claims
+  PARKED `analyzing` jobs (render budget available) and moves them to
+  `rendering`; expired-lease crash recovery covers `rendering`; a transient
+  rendering failure requeues to the parked `analyzing` state and consumes
+  one `render_attempts` (dedicated budget, bounded by `jobs.max_attempts`,
+  since `attempt_count` is consumed by every claim); a new
+  `complete_job_rendering` RPC is the ONLY path to `completed` in rendering —
+  it requires ownership, status `rendering`, ≥1 clip and EVERY clip `ready`
+  with a `storage_path`. All 7 queue RPCs stay service-role-only.
+- **Renderer** (`worker/app/rendering`): one managed FFmpeg subprocess per
+  clip (wall-clock timeout → kill + await, partial output removed on every
+  failure path, cancellation-safe). Source geometry is measured from the
+  raw bytes: FFprobe plus a direct MP4 box scan for the `rot `/`dtrt`
+  rotation atoms (version-independent ground truth). A detected clockwise
+  rotation is baked into the pixels with an explicit `transpose`/flip filter
+  (deterministic — this build's `-autorotate` ignores MP4 rotation boxes).
+  Aspect ratio is never distorted: uniform scale + center-crop (cover) or
+  black-pad (contain) to exact 1080x1920, H.264 (CRF 20, veryfast), 30 fps,
+  yuv420p, AAC 128k, fast-start.
+- **Output contract** (FFprobe on the rendered bytes, never trusted):
+  MP4 container, H.264 video, AAC audio required, EXACT 1080x1920, yuv420p,
+  stored rotation ≤ 0.5°, duration within ±15% of the clip window. Any
+  violation is a permanent `render_invalid` failure — a non-conforming clip
+  is never uploaded.
+- **Processor** (`worker/app/processors/rendering.py`): download verified
+  source → re-probe → render the remaining clips (skipping clips already
+  `ready` — resume after crash/retry) under a per-job concurrency bound
+  (`WORKER_RENDER_CONCURRENCY`) → validate each output → upsert-upload to
+  `clipforge-clips` at `clips/{job_id}/{clip_id}.mp4` (path-shape validated,
+  size-capped, idempotent) → mark `ready` with the storage path →
+  `complete_job_rendering`. First clip error cancels siblings; same
+  lease/ownership/temp-cleanup contract as Phases 3-4; the worker can never
+  mark a job `completed` on its own (the DB guard enforces it).
+- Tests: render profiles, FFmpeg run lifecycle (timeout/cancel/cleanup),
+  output validation, **renderer integration with REAL FFmpeg/FFprobe**
+  (portrait/landscape/square/rotated → exact 1080x1920, zero output
+  rotation, corrupt, timeout, cancellation), full processor lifecycle
+  (fakes + real FFmpeg: success, resume, no-clips, every failure category,
+  lease loss, refusal paths, sibling cancellation, idempotent retry),
+  Phase 5 queue semantics on a real PostgreSQL engine (pglite WASM),
+  worker dispatch (rendering → renderer, missing renderer releases safely).
+- Note: applied to a real Supabase project remains an explicit live step
+  (verified development project required; none was provisioned in this
+  phase).
+
+## Phase 5B — Subtitles
+
+- Modern animated subtitles burned in from the transcription (word-level),
+  extending the existing render pipeline (`RenderSpec.captions` is already
+  carried by the contract).
 
 ## Phase 6 — Product completion
 
