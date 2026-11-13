@@ -204,6 +204,48 @@ class Settings(BaseSettings):
     #: layout-agnostic).
     game_vision_kill_feed_roi: str | None = "0.80,0.02,0.18,0.12"
 
+    # -- TASK 010: advanced multimodal fusion (OPTIONAL engine layer) ------
+    #: Master switch. OFF by default — when OFF the completion phase runs
+    #: Phase 7 ``fuse()`` EXACTLY as before (byte-identical behavior,
+    #: verified by an A/B pipeline test). When ON, fusion runs through
+    #: the temporal multimodal engine (worker/app/intel/multimodal):
+    #: the same qualifying candidates (unchanged score_cluster bar) get
+    #: a conservative ``heuristic_confidence`` (NOT a calibrated
+    #: probability — see docs) and size-bounded evidence provenance.
+    #: Pure over the persisted events: no schema change, no new
+    #: dependency, resumable exactly like Phase 7.
+    multimodal_enabled: bool = False
+    #: Correlation window (s) for the engine's temporal clustering.
+    multimodal_correlation_window_seconds: float = Field(default=2.5, gt=0, le=30)
+    #: Temporal decay constant (s): proximity weight = exp(-gap/tau).
+    multimodal_decay_tau_seconds: float = Field(default=2.5, gt=0, le=30)
+    #: Same family + kind within this gap (s) = repeat of the SAME
+    #: physical signal (corroboration, never independence).
+    multimodal_same_kind_merge_seconds: float = Field(default=1.0, ge=0, le=30)
+    #: Floor for a candidate's heuristic confidence (below → suppressed).
+    multimodal_confidence_threshold: float = Field(default=0.30, ge=0, le=1)
+    #: Minimum INDEPENDENT modality count required for any candidate.
+    multimodal_min_independent_modalities: int = Field(default=1, ge=1, le=4)
+    #: Strength a strong audio-only solo anchor must reach (spec 6E).
+    multimodal_strong_audio_only_threshold: float = Field(default=0.80, ge=0, le=1)
+    #: Candidate boundary padding (s) around the measured cluster span,
+    #: clamped to the source (selection adds its own context on top).
+    multimodal_pre_padding_seconds: float = Field(default=1.0, ge=0, le=60)
+    multimodal_post_padding_seconds: float = Field(default=2.0, ge=0, le=60)
+    #: One-family candidates below this max strength are suppressed
+    #: (single-source repetition can't justify a moment; a strong
+    #: single-source moment still can).
+    multimodal_single_source_min_strength: float = Field(default=0.60, ge=0, le=1)
+    # Hard budgets (ENFORCED — deterministic truncation + reporting).
+    multimodal_max_events: int = Field(default=5000, ge=1, le=100000)
+    multimodal_max_clusters: int = Field(default=500, ge=1, le=10000)
+    multimodal_max_signals_per_cluster: int = Field(default=64, ge=1, le=512)
+    multimodal_max_edges_per_node: int = Field(default=8, ge=1, le=64)
+    multimodal_max_sequences_per_cluster: int = Field(default=8, ge=1, le=64)
+    multimodal_max_sequence_length: int = Field(default=4, ge=2, le=16)
+    multimodal_max_candidates: int = Field(default=200, ge=1, le=1000)
+    multimodal_processing_budget_seconds: float = Field(default=30.0, gt=0, le=600)
+
     @field_validator("transcription_language")
     @classmethod
     def _empty_language_to_none(cls, value: str | None) -> str | None:

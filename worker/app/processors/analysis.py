@@ -40,6 +40,7 @@ from ..intel.audio_features import AudioFeatureError
 from ..intel.checkpoints import IntelStore, IntelStoreError
 from ..intel.facecam import FacecamConfig, build_facecam_analyzer
 from ..intel.game_vision import build_game_vision_analyzer
+from ..intel.multimodal import MultimodalConfig
 from ..intel.pipeline import PipelineCancelled, PipelineConfig, PipelineError, StreamIntelPipeline
 from ..intel.selection import SelectedClip
 from ..intel.visual_features import VisualFeatureError
@@ -362,6 +363,52 @@ class AnalysisProcessor:
             game_vision_analyzer = build_game_vision_analyzer(self._settings)
             game_vision_config = getattr(game_vision_analyzer, "config", None)
 
+        # TASK 010: advanced multimodal fusion engine (OPTIONAL layer over
+        # Phase 7 fusion). Disabled → None → the completion phase is
+        # byte-identical to Phase 7. Enabled → validated engine config
+        # (settings are already range-checked at startup; the guard below
+        # is defense-in-depth — a bad config degrades to Phase 7 rather
+        # than failing the job).
+        multimodal_config: MultimodalConfig | None = None
+        if self._settings.multimodal_enabled:
+            try:
+                multimodal_config = MultimodalConfig(
+                    correlation_window_seconds=float(
+                        self._settings.multimodal_correlation_window_seconds),
+                    decay_tau_seconds=float(
+                        self._settings.multimodal_decay_tau_seconds),
+                    same_kind_merge_seconds=float(
+                        self._settings.multimodal_same_kind_merge_seconds),
+                    confidence_threshold=float(
+                        self._settings.multimodal_confidence_threshold),
+                    min_independent_modalities=int(
+                        self._settings.multimodal_min_independent_modalities),
+                    strong_audio_only_threshold=float(
+                        self._settings.multimodal_strong_audio_only_threshold),
+                    pre_padding_seconds=float(
+                        self._settings.multimodal_pre_padding_seconds),
+                    post_padding_seconds=float(
+                        self._settings.multimodal_post_padding_seconds),
+                    single_source_min_strength=float(
+                        self._settings.multimodal_single_source_min_strength),
+                    max_events=int(self._settings.multimodal_max_events),
+                    max_clusters=int(self._settings.multimodal_max_clusters),
+                    max_signals_per_cluster=int(
+                        self._settings.multimodal_max_signals_per_cluster),
+                    max_edges_per_node=int(self._settings.multimodal_max_edges_per_node),
+                    max_sequences_per_cluster=int(
+                        self._settings.multimodal_max_sequences_per_cluster),
+                    max_sequence_length=int(
+                        self._settings.multimodal_max_sequence_length),
+                    max_candidates=int(self._settings.multimodal_max_candidates),
+                    processing_budget_seconds=float(
+                        self._settings.multimodal_processing_budget_seconds),
+                )
+            except ValueError as exc:
+                logger.warning("job %s: multimodal config invalid (%s); "
+                               "falling back to Phase 7 fusion", job_id, exc)
+                multimodal_config = None
+
         # Per-job pipeline: the chunk/overlap/budget come from the settings
         # (operational limits); the clip cap honours the JOB's request.
         config = PipelineConfig(
@@ -374,6 +421,7 @@ class AnalysisProcessor:
             requested_clips=int(job.get("requested_clips") or self._settings.intel_requested_clips),
             facecam=facecam_config,
             game_vision=game_vision_config,
+            multimodal=multimodal_config,
         )
         pipeline = StreamIntelPipeline(
             self._settings.ffmpeg_path, self._intel_store, config,
