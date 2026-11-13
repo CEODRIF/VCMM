@@ -1,7 +1,9 @@
 "use client";
 
 import * as React from "react";
-import { CheckCircle2, Info, Wand2, Youtube } from "lucide-react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { CheckCircle2, Info, Loader2, Wand2, Youtube } from "lucide-react";
 
 import { appConfig } from "@/config/app";
 import type { CreationOptions, SourceType, UploadedFileMeta } from "@/types";
@@ -36,14 +38,22 @@ interface FieldErrors {
 }
 
 /**
- * Main creation form.
+ * Main creation form — connected to the real job API since Phase 2.
  *
- * INTEGRATION POINT (Phase 2/3): on a valid submit this form will POST the
- * validated CreationOptions to /api/v1/jobs, which enqueues the worker.
- * Today it only validates and shows an explicit "not connected" state —
- * it never pretends processing happened.
+ * On a valid submit the form POSTs to /api/v1/jobs (session cookie sent
+ * automatically). A 401 means the user must enter the access code first;
+ * a 201 means a real job row was created and we navigate to its live
+ * processing page.
+ *
+ * REMAINING INTEGRATION POINT (Phase 3): upload-source jobs are created with
+ * a reserved storage path; the actual file transfer arrives in Phase 3.
  */
 export function CreationForm() {
+  const router = useRouter();
+  const [submitting, setSubmitting] = React.useState(false);
+  const [authRequired, setAuthRequired] = React.useState(false);
+  const [serverError, setServerError] = React.useState<string | null>(null);
+  const [createdJobId, setCreatedJobId] = React.useState<string | null>(null);
   const [sourceType, setSourceType] = React.useState<SourceType>("youtube");
   const [youtubeUrl, setYoutubeUrl] = React.useState("");
   const [file, setFile] = React.useState<UploadedFileMeta | null>(null);
@@ -51,15 +61,20 @@ export function CreationForm() {
   const [duration, setDuration] = React.useState<number>(clips.defaultSeconds);
   const [captionsEnabled, setCaptionsEnabled] = React.useState(true);
   const [errors, setErrors] = React.useState<FieldErrors>({});
-  const [submitted, setSubmitted] = React.useState(false);
 
   function clearSourceErrors() {
     setErrors((previous) => ({ ...previous, source: undefined }));
   }
 
-  function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+  function resetTransientState() {
+    setAuthRequired(false);
+    setServerError(null);
+    setCreatedJobId(null);
+  }
+
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setSubmitted(false);
+    resetTransientState();
 
     const nextErrors: FieldErrors = {};
     if (sourceType === "youtube") {
@@ -75,24 +90,51 @@ export function CreationForm() {
 
     setErrors(nextErrors);
     if (Object.values(nextErrors).some(Boolean)) {
-      setSubmitted(false);
       return;
     }
 
-    const options: CreationOptions = {
+    // Server re-validates everything; the payload carries no session or
+    // ownership data (ownership comes from the HttpOnly session cookie).
+    const payload = {
       sourceType,
       youtubeUrl: sourceType === "youtube" ? youtubeUrl.trim() : undefined,
-      uploadedFile: sourceType === "upload" ? file ?? undefined : undefined,
+      fileName: sourceType === "upload" ? file?.name : undefined,
       clipCount,
       clipDurationSeconds: duration,
-      outputAspect: "9:16",
-      resolution: "1080p",
       captionsEnabled,
     };
 
-    // INTEGRATION POINT (Phase 2/3): submit `options` to the job API here.
-    console.debug("[ClipForge] validated creation options (Phase 1 - not submitted)", options);
-    setSubmitted(true);
+    setSubmitting(true);
+    try {
+      const response = await fetch("/api/v1/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = (await response.json().catch(() => null)) as {
+        error?: string;
+        job?: { id: string };
+      } | null;
+
+      if (response.status === 401) {
+        setAuthRequired(true);
+        return;
+      }
+      if (response.status === 400) {
+        setServerError(data?.error ?? "The server rejected this configuration.");
+        return;
+      }
+      if (response.status === 201 && data?.job) {
+        setCreatedJobId(data.job.id);
+        router.push(`/processing?job=${data.job.id}`);
+        return;
+      }
+      setServerError(data?.error ?? "Could not create the job. Try again.");
+    } catch {
+      setServerError("Network error. Check your connection and try again.");
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
@@ -118,7 +160,6 @@ export function CreationForm() {
                 onClick={() => {
                   setSourceType(tab.value);
                   clearSourceErrors();
-                  setSubmitted(false);
                 }}
                 className={cn(
                   "flex items-center gap-2 rounded-md border px-4 py-2 text-sm font-medium transition-colors",
@@ -145,7 +186,6 @@ export function CreationForm() {
                 onChange={(event) => {
                   setYoutubeUrl(event.target.value);
                   clearSourceErrors();
-                  setSubmitted(false);
                 }}
                 aria-invalid={errors.source ? true : undefined}
                 className={cn(errors.source && "border-destructive focus-visible:ring-destructive")}
@@ -167,12 +207,10 @@ export function CreationForm() {
               onFileSelected={(next) => {
                 setFile(next);
                 clearSourceErrors();
-                setSubmitted(false);
               }}
               onFileCleared={() => {
                 setFile(null);
                 clearSourceErrors();
-                setSubmitted(false);
               }}
             />
           )}
@@ -192,7 +230,6 @@ export function CreationForm() {
               value={clipCount}
               onChange={(event) => {
                 setClipCount(Number(event.target.value));
-                setSubmitted(false);
               }}
             >
               {COUNT_OPTIONS.map((count) => (
@@ -215,7 +252,6 @@ export function CreationForm() {
               value={duration}
               onChange={(event) => {
                 setDuration(Number(event.target.value));
-                setSubmitted(false);
               }}
             >
               {DURATION_OPTIONS.map((seconds) => (
@@ -264,26 +300,54 @@ export function CreationForm() {
             <span className="text-sm">Modern animated subtitles</span>
           </Checkbox>
 
-          <Button type="submit" size="lg" className="w-full">
-            <Wand2 size={16} /> Start Creating
+          <Button type="submit" size="lg" className="w-full" disabled={submitting}>
+            {submitting ? (
+              <>
+                <Loader2 size={16} className="animate-spin" /> Creating…
+              </>
+            ) : (
+              <>
+                <Wand2 size={16} /> Start Creating
+              </>
+            )}
           </Button>
 
-          {submitted && (
+          {authRequired && (
+            <div
+              className="flex items-start gap-3 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive"
+              role="alert"
+            >
+              <Info size={16} className="mt-0.5 shrink-0" />
+              <p>
+                Your session is not active.{" "}
+                <Link href="/access" className="font-medium underline underline-offset-2">
+                  Enter your access code
+                </Link>{" "}
+                and come back.
+              </p>
+            </div>
+          )}
+
+          {serverError && (
+            <p className="text-sm text-destructive" role="alert">
+              {serverError}
+            </p>
+          )}
+
+          {createdJobId && (
             <div
               className="flex items-start gap-3 rounded-md border border-primary/30 bg-primary/10 p-3 text-sm text-accent-foreground"
               role="status"
             >
               <CheckCircle2 size={18} className="mt-0.5 shrink-0 text-primary" />
-              <p>
-                Configuration validated. The processing backend is not connected yet, so no job was
-                created. Job submission lands in Phase 2 (see docs/ROADMAP.md).
-              </p>
+              <p>Job {createdJobId} created — opening the live processing view.</p>
             </div>
           )}
 
           <p className="flex items-start gap-2 text-xs text-muted-foreground">
             <Info size={13} className="mt-0.5 shrink-0" />
-            Phase 1 foundation — video processing is intentionally not wired up.
+            Jobs are created and tracked in Phase 2. Video download, transcription and rendering
+            run in the worker during Phases 3-5, and uploads transfer in Phase 3.
           </p>
         </CardContent>
       </Card>

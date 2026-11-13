@@ -1,7 +1,10 @@
 import Link from "next/link";
+import { cookies } from "next/headers";
 import { Scissors } from "lucide-react";
 
 import { appConfig } from "@/config/app";
+import { securityConfig } from "@/config/security";
+import { SessionSignOut } from "@/components/session-sign-out";
 import { Badge } from "@/components/ui/badge";
 
 const NAV_LINKS = [
@@ -31,8 +34,9 @@ export function SiteHeader() {
               {link.label}
             </Link>
           ))}
+          {cookies().get(securityConfig.session.cookieName)?.value ? <SessionSignOut /> : null}
           <Badge variant="secondary" className="ml-2 hidden md:inline-flex">
-            Phase 1
+            Phase 2
           </Badge>
         </nav>
 

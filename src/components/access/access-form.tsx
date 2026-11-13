@@ -1,7 +1,8 @@
 "use client";
 
 import * as React from "react";
-import { Eye, EyeOff, KeyRound, ShieldCheck } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { Eye, EyeOff, KeyRound, Loader2, LogIn } from "lucide-react";
 
 import { appConfig } from "@/config/app";
 import { Button } from "@/components/ui/button";
@@ -10,21 +11,24 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 
-type FormState = "idle" | "submitted";
+type FormStatus = "idle" | "submitting" | "error" | "success";
 
 /**
- * Shared access-code entry (UI ONLY in Phase 1).
+ * Shared access-code entry — connected to the real server-side
+ * authentication (POST /api/access) since Phase 2.
  *
- * SECURITY NOTE: no authentication is implemented in the browser. The code is
- * never compared against a value shipped to the client. Server-side
- * verification (hash comparison + session token) arrives in Phase 2 —
- * see docs/ROADMAP.md.
+ * SECURITY: the code is sent once to the server over HTTPS and verified
+ * against a stored SHA-256 hash in constant time. The browser never compares
+ * the code against anything it holds, and the resulting session lives in an
+ * HttpOnly cookie that JavaScript cannot read. Attempts are rate-limited
+ * server-side (5 per 15 minutes per IP).
  */
 export function AccessForm() {
+  const router = useRouter();
   const [code, setCode] = React.useState("");
   const [visible, setVisible] = React.useState(false);
+  const [status, setStatus] = React.useState<FormStatus>("idle");
   const [error, setError] = React.useState<string | null>(null);
-  const [state, setState] = React.useState<FormState>("idle");
 
   function validate(nextCode: string): string | null {
     const trimmed = nextCode.trim();
@@ -38,19 +42,46 @@ export function AccessForm() {
     return null;
   }
 
-  function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const problem = validate(code);
     if (problem) {
       setError(problem);
-      setState("idle");
+      setStatus("error");
       return;
     }
+
     setError(null);
-    // INTEGRATION POINT (Phase 2): POST /api/access with the code,
-    // server compares against ACCESS_CODE_HASH and sets an httpOnly session
-    // cookie. Nothing like that is sent or stored by the browser today.
-    setState("submitted");
+    setStatus("submitting");
+    try {
+      const response = await fetch("/api/access", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: code.trim() }),
+      });
+      const data = (await response.json().catch(() => null)) as { error?: string } | null;
+
+      if (response.ok) {
+        setStatus("success");
+        router.push("/create");
+        return;
+      }
+      if (response.status === 429) {
+        setStatus("error");
+        setError(data?.error ?? "Too many attempts. Please wait a few minutes.");
+        return;
+      }
+      if (response.status === 503) {
+        setStatus("error");
+        setError("Access service is not configured on this deployment.");
+        return;
+      }
+      setStatus("error");
+      setError(data?.error ?? "Unable to verify the access code. Try again.");
+    } catch {
+      setStatus("error");
+      setError("Network error. Check your connection and try again.");
+    }
   }
 
   return (
@@ -80,9 +111,9 @@ export function AccessForm() {
                 placeholder="••••••••"
                 autoComplete="off"
                 spellCheck={false}
-                aria-invalid={error ? true : undefined}
+                aria-invalid={status === "error" ? true : undefined}
                 aria-describedby={error ? "access-code-error" : undefined}
-                className={cn("pr-11", error && "border-destructive focus-visible:ring-destructive")}
+                className={cn(status === "error" && "border-destructive focus-visible:ring-destructive")}
               />
               <button
                 type="button"
@@ -100,23 +131,22 @@ export function AccessForm() {
             )}
           </div>
 
-          <Button type="submit" className="w-full">
-            Unlock
+          <Button type="submit" className="w-full" disabled={status === "submitting"}>
+            {status === "submitting" ? (
+              <>
+                <Loader2 size={16} className="animate-spin" /> Verifying…
+              </>
+            ) : (
+              <>
+                <LogIn size={16} /> Unlock
+              </>
+            )}
           </Button>
 
-          {state === "submitted" && (
-            <div
-              className="flex items-start gap-3 rounded-md border border-primary/30 bg-primary/10 p-3 text-sm text-accent-foreground"
-              role="status"
-            >
-              <ShieldCheck size={18} className="mt-0.5 shrink-0 text-primary" />
-              <p>
-                Input validated. Server-side access verification is not enabled in Phase 1 —
-                it will be implemented securely in Phase 2 (see docs/ROADMAP.md). You can
-                explore the creation flow now.
-              </p>
-            </div>
-          )}
+          <p className="text-xs text-muted-foreground">
+            Verified server-side in constant time. Too many failed attempts are locked out
+            temporarily.
+          </p>
         </form>
       </CardContent>
     </Card>
