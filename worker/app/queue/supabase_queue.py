@@ -154,6 +154,23 @@ class SupabaseQueue:
         )
         return bool(rows)
 
+    async def set_job_source(self, job_id: str, worker_id: str, source_path: str) -> bool:
+        """TASK 011: pin a materialized source object on an owned job.
+
+        The path is written ONLY if the job is still in ``validating`` and
+        still locked by ``worker_id`` — a stale worker can never attach a
+        source to a job someone else now owns. Returns False when the
+        guarded update matched no row (ownership lost; the caller must stop
+        and clean up its temporary object).
+        """
+        rows = await self._table_update(
+            "jobs",
+            {"source_path": source_path},
+            {"id": job_id, "status": "validating", "locked_by": worker_id},
+            select="id",
+        )
+        return bool(rows)
+
     async def _table_update(self, table: str, values: dict[str, Any], where: dict[str, Any], select: str) -> list[dict[str, Any]]:
         try:
             builder = self._client.table(table).update(values)

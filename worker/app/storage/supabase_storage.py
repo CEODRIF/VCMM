@@ -99,6 +99,54 @@ class SupabaseStorage:
             )
             raise StorageDownloadError("source download failed") from exc
 
+    async def upload_source(self, job_id: str, source_file: Path,
+                            content_type: str = "video/mp4") -> str:
+        """TASK 011: uploads a MATERIALIZED source into the private
+        ``clipforge-sources`` bucket and returns the object path.
+
+        The path is 100% server-generated — ``sources/{job_id:uuid}/
+        original/{uuid}.mp4`` (the SAME shape the API generates for
+        direct uploads, so every downstream path check works unchanged);
+        ``job_id`` must be a UUID and no user input can reach the path.
+        The file is STREAMED (file handle — never read fully into
+        memory) and size-capped by the same limit as downloads.
+        """
+        import uuid as _uuid
+
+        try:
+            _uuid.UUID(str(job_id))
+        except (ValueError, AttributeError, TypeError):
+            raise StorageUploadError("source upload requires a UUID job id") from None
+        filename = f"{_uuid.uuid4()}.mp4"
+        object_path = f"sources/{job_id}/original/{filename}"
+        if not _SOURCE_PATH_PATTERN.match(object_path):
+            raise StorageUploadError("invalid generated source path (internal error)")
+
+        source = Path(source_file)
+        if not source.is_file():
+            raise StorageUploadError("materialized file is missing")
+        size = source.stat().st_size
+        if size == 0:
+            raise StorageUploadError("materialized file is empty")
+        if size > self._max_bytes:
+            raise StorageUploadError(
+                f"materialized file exceeds maximum size ({self._max_bytes} bytes)"
+            )
+        try:
+            # storage3 streams file handles (no whole-file read).
+            with source.open("rb") as handle:
+                await self._client.storage.from_(SOURCES_BUCKET).upload(
+                    object_path, handle,
+                    {"content-type": content_type, "upsert": False},
+                )
+        except StorageUploadError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — transport boundary
+            logger.warning("source upload failed for job %s: %s",
+                           job_id, exc.__class__.__name__)
+            raise StorageUploadError("source upload failed") from exc
+        return object_path
+
     async def upload_from(self, object_path: str, source_file: Path, max_bytes: int | None = None) -> int:
         """Uploads a rendered clip from ``source_file``; returns bytes sent.
 
