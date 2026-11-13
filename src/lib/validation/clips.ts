@@ -78,3 +78,35 @@ export function validateYoutubeUrl(url: string): ValidationResult {
   }
   return { valid: true };
 }
+
+const TWITCH_HOSTS = new Set(["twitch.tv", "m.twitch.tv"]);
+/** Canonical Twitch VOD paths: /videos/{id} or /{channel}/videos/{id}. */
+const TWITCH_VOD_PATH = /^\/(?:[a-z0-9_]{1,25}\/)?videos\/\d{1,15}$/;
+
+/** Validates that a string is a canonical Twitch VOD URL (client-side UX). */
+export function validateTwitchUrl(url: string): ValidationResult {
+  const trimmed = url.trim();
+  if (trimmed === "") {
+    return { valid: false, error: "Paste a Twitch VOD URL or upload a video file." };
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return { valid: false, error: "Enter a valid URL, e.g. https://twitch.tv/videos/123456789" };
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    return { valid: false, error: "Only http(s) Twitch URLs are supported." };
+  }
+  const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+  if (!TWITCH_HOSTS.has(host)) {
+    return { valid: false, error: "That does not look like a Twitch URL." };
+  }
+  if (!TWITCH_VOD_PATH.test(parsed.pathname)) {
+    return {
+      valid: false,
+      error: "Use a VOD link, e.g. https://twitch.tv/videos/123456789 — live streams are not available yet.",
+    };
+  }
+  return { valid: true };
+}

@@ -3,7 +3,7 @@
 ClipForge AI is a web application that transforms long-form videos into short-form vertical clips using AI.
 
 - No user registration — one shared access code.
-- YouTube URL input (authorized source provider) or direct video file uploads.
+- YouTube / Twitch VOD URL input (authorized source providers) or direct video file uploads.
 - AI-powered clip detection, clips between 60 and 180 seconds.
 - Vertical 9:16 output at 1080x1920 (1080p) with modern animated subtitles.
 - Individual downloads and ZIP batch downloads.
@@ -17,11 +17,16 @@ ClipForge AI is a web application that transforms long-form videos into short-fo
 > (chunk size, per-claim budget, timeouts) are configurable via
 > `WORKER_INTEL_*`. Rendering is source-aware: 60 fps sources render at 60
 > fps, everything else keeps the 30 fps profile (no fake frame rates).
-> Provider adapters (YouTube/Twitch validation-only, upload fully
-> implemented) sit outside the pipeline; nothing claims support it has not
-> implemented AND tested. The in-loop job integration is a deliberate next
-> step (queue "incomplete → continue" transition), documented in
-> `docs/stream-intelligence.md` §11; Phases 1–6 behavior is unchanged.
+> The source-provider layer (Phase 8, TASK 011) is provider-independent:
+> YouTube/Twitch metadata comes ONLY from official APIs (oEmbed keyless /
+> Data API v3 / Helix), is typed and normalized, and platform-URL
+> materialization is honestly UNSUPPORTED (the official APIs expose no
+> media-download endpoint — no workaround, no yt-dlp/cookies/DRM bypass);
+> the SSRF-guarded streaming materialization infrastructure is built and
+> tested for a future licensed path. The creation form offers YouTube VOD,
+> Twitch VOD, and direct upload; a provider that cannot be configured or
+> cannot materialize returns a clear 503 and NO job is created. Direct
+> upload and Phases 1–7 behavior are unchanged.
 > (Phase 6 recap: rendered clips are a usable end product — Results page
 > wired to a session-protected results API with real previews, per-clip
 > downloads and a streamed size-capped ZIP; every route re-verifies session
@@ -301,17 +306,18 @@ pull requests:
 | --- | --- |
 | Frontend foundation (Next.js, TS strict, Tailwind, shadcn-compatible UI kit) | Done |
 | Landing / Access / Creation / Processing / Results pages | Done |
-| Creation form validation (YouTube URL, clip count 1-10, duration 60-180s) | Done (client + server) |
+| Creation form validation (YouTube URL, Twitch VOD URL, clip count 1-10, duration 60-180s) | Done (client + server) |
 | Python worker + `GET /health` + settings + JSON logging + Docker | Done |
 | Supabase schema (3 tables, RLS deny-by-default) + Phase 2 columns | Version-controlled; tested against real Postgres (WASM); apply to a dev project before use |
 | Access-code authentication (rate-limited, constant-time, hash-only) | **Done — `POST /api/access`** |
 | Anonymous sessions (HttpOnly cookie, 24h, hash stored, sign-out) | **Done** |
- | Job creation API (`POST /api/v1/jobs`, session-scoped) | **Done** (upload → `uploading`; YouTube → 503 until an authorized provider is configured) |
+ | Job creation API (`POST /api/v1/jobs`, session-scoped) | **Done** (upload → `uploading`; YouTube/Twitch → capability gate: 503 with a clear "not configured" or "cannot be materialized" message, no job row) |
  | Job status API (`GET /api/v1/jobs`, `GET /api/v1/jobs/[id]`) | **Done** (live polling UI, 9 states) |
  | Direct upload: authorize → browser PUT → verified completion | **Done** (signed URLs, private bucket, real progress + cancel + retry in the UI) |
  | Postgres job queue (atomic claim, leases, retry, crash recovery) | **Done** (restricted RPCs, tested on a real Postgres engine) |
  | Worker ingestion (claim → download → FFprobe validation → `ready`) | **Done** (bounded concurrency, lease renewal, graceful shutdown) |
- | YouTube source provider | **Interface only** — no authorized provider ships with the repo; creation returns a clear 503, uploads are unaffected. No unauthorized downloader exists or may be added |
+  | YouTube source provider | **Phase 8 (TASK 011)** — worker validates metadata via official APIs (keyless oEmbed partial; Data API v3 with API key or OAuth); materialization is honestly unsupported (no official media-download API) → clear 503/permanent typed error. No authorized provider ships with the repo; uploads unaffected. No unauthorized downloader exists or may be added |
+  | Twitch source provider | **Phase 8 (TASK 011)** — worker validates VOD metadata via official Helix (Client-Id or app-access-token); live/channel URLs classified; materialization honestly unsupported (same boundary as YouTube) → clear 503/permanent typed error. No unauthorized path exists or may be added |
  | Worker analysis: audio extraction + local Whisper transcription + clip detection/scoring | **Done** (optional `faster-whisper` dependency; honest `transcription_unavailable` failure when not installed; word-level timestamps; 60-180s windows; explainable scores persisted to `clips`) |
   | Jobs parked at `analyzing` with detected clips | **Done** (stage-aware queue; crash recovery; bounded retries) |
   | Clip rendering pipeline (Phase 5A): claim parked → render cut/reframe/encode to 1080x1920 H.264+AAC → validate → upload to `clipforge-clips` → DB-guarded `completed` | **Done** (rotation-correct, aspect-ratio-preserving; resume + bounded render retries; no false `completed` possible) |
@@ -356,10 +362,19 @@ pull requests:
   `transcription_unavailable` error — no fake output is ever produced. With
   it, the first run downloads the selected model weights from Hugging Face
   once (plain file download, no API/credentials/cost).
-- YouTube sources: only the provider interface exists. Without an explicitly
-  approved, authorized source provider the API returns a clear 503. No
-  yt-dlp/cookies/DRM-bypass path exists in this codebase and none may be
-  added. Direct file upload is fully functional and independent.
+- YouTube/Twitch sources (Phase 8, TASK 011): the worker retrieves METADATA
+  from the official APIs only (keyless oEmbed partial; YouTube Data API v3
+  with an API key or OAuth; Twitch Helix with a client id or app-access
+  token) and classifies availability states honestly. MATERIALIZATION of
+  platform URLs is unsupported because the official APIs expose no
+  media-download endpoint — the API returns a clear 503 at creation (no job
+  row) and the worker fails such jobs permanently with "upload the file
+  directly" if one is ever enqueued. No yt-dlp/cookies/DRM-bypass/scraping
+  path exists in this codebase and none may be added. Live provider
+  operations are NOT verified by the test suite (mocked, offline tests only);
+  metadata live calls require operator-configured official credentials
+  (free-tier, no spend). Direct file upload is fully functional and
+  independent.
 - Large uploads are not chunked/resumable at the storage protocol level; a
   browser interruption must re-PUT the whole file (the authorization can be
   re-requested and completion is idempotent, so a retry is always safe).

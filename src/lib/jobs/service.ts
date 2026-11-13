@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 
 import { insertJob } from "@/lib/db/jobs";
 import { ApiError } from "@/lib/api/errors";
+import { getTwitchProvider } from "@/lib/providers/twitch";
 import { getYouTubeProvider } from "@/lib/providers/youtube";
 import type { CreateJobInput } from "@/lib/jobs/validate";
 
@@ -46,6 +47,16 @@ export async function createJob(input: CreateJobInput, sessionId: string): Promi
         "YouTube source provider is not configured on this deployment. Direct video file upload is available."
       );
     }
+    // TASK 011 capability gate: metadata availability NEVER implies
+    // materialization authorization. A provider that can read metadata but
+    // has no authorized media-download path is refused with a clear,
+    // distinct message (no job row is created).
+    if (!provider.supportsMaterialization()) {
+      throw new ApiError(
+        503,
+        "YouTube sources cannot be materialized on this deployment: the official YouTube APIs expose metadata but no authorized media-download endpoint. Direct video file upload is available."
+      );
+    }
     // INTEGRATION POINT (authorized provider only): an explicitly approved
     // YouTubeSourceProvider implementation would materialize the source into
     // private storage here. None ships with this codebase, so a configured
@@ -53,6 +64,33 @@ export async function createJob(input: CreateJobInput, sessionId: string): Promi
     throw new ApiError(
       503,
       "YouTube source provider is not configured on this deployment. Direct video file upload is available."
+    );
+  }
+
+  if (input.sourceType === "twitch") {
+    const provider = getTwitchProvider();
+    if (!provider.isAvailable()) {
+      throw new ApiError(
+        503,
+        "Twitch source provider is not configured on this deployment. Direct video file upload is available."
+      );
+    }
+    // Same capability gate as YouTube (TASK 011): the official Twitch APIs
+    // (Helix) expose metadata only — no media-download endpoint — so an
+    // honest implementation reports supportsMaterialization() = false and
+    // job creation is refused with a clear, distinct message.
+    if (!provider.supportsMaterialization()) {
+      throw new ApiError(
+        503,
+        "Twitch sources cannot be materialized on this deployment: the official Twitch APIs expose metadata but no authorized media-download endpoint. Direct video file upload is available."
+      );
+    }
+    // INTEGRATION POINT (authorized provider only): a licensed ingestion
+    // path explicitly approved and wired here would materialize the VOD
+    // into private storage. None ships with this codebase.
+    throw new ApiError(
+      503,
+      "Twitch source provider is not configured on this deployment. Direct video file upload is available."
     );
   }
 

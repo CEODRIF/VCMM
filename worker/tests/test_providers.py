@@ -1,4 +1,5 @@
-"""Provider adapter tests (TASK 007) — deterministic, NO real network.
+"""Provider adapter tests (TASK 007, adapted by TASK 011) — deterministic,
+NO real network.
 
 httpx.MockTransport drives the YouTube (oEmbed) and Twitch (Helix) adapters
 through every documented outcome: available, deleted/private, restricted
@@ -6,12 +7,21 @@ through every documented outcome: available, deleted/private, restricted
 network failures. The upload adapter is tested with a fake download
 callable (no real downloads anywhere). The materialization honesty gate is
 asserted for every validation-only adapter.
+
+TASK 011 additions (adaptations, not weakenings):
+- every provider under test gets an OFFLINE resolver stub, so the SSRF
+  guard's DNS revalidation never touches the real network;
+- Twitch tests carry a minimal ``TwitchConfig(client_id=...)`` — the
+  official minimum for public VOD metadata (Client-Id header mode);
+- Twitch live/channel URLs now query the official ``/streams`` endpoint
+  (online → restricted "wait for the VOD", offline → unavailable);
+- a new unconfigured-Twitch test asserts the honest "not configured"
+  status with NO network call.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 
 import httpx
@@ -27,7 +37,7 @@ from app.providers.base import (
     ProviderNotSupported,
 )
 from app.providers.registry import default_providers, provider_for_url
-from app.providers.twitch import TwitchProvider
+from app.providers.twitch import TwitchConfig, TwitchProvider
 from app.providers.upload import UploadProvider
 from app.providers.youtube import YouTubeProvider
 from app.queue.models import ERROR_STORAGE_DOWNLOAD
@@ -40,6 +50,15 @@ def run(coro):
 
 def client_with(handler) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def _public_resolver(hostname: str):
+    """Deterministic offline DNS: every name resolves to one public IP."""
+    return ["93.184.216.34"]
+
+
+#: The official minimum Twitch credential (client id → Client-Id header).
+_TEST_TWITCH_CONFIG = TwitchConfig(client_id="test-client-id")
 
 
 # =============================================================================
@@ -77,37 +96,46 @@ def test_youtube_available():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"title": "My VOD", "type": "video"})
 
-    p = YouTubeProvider(http_client=client_with(handler))
+    p = YouTubeProvider(http_client=client_with(handler), resolver=_public_resolver)
     check = run(p.validate("https://youtu.be/abc123XYZ"))
     assert check.status == STATUS_AVAILABLE
     assert check.title == "My VOD"
     assert check.reason is None
+    # TASK 011: keyless oEmbed carries partial, HONEST metadata
+    assert check.metadata is not None
+    assert check.metadata.title == "My VOD"
+    assert check.metadata.duration_seconds is None  # unknown stays unknown
+    assert check.metadata.state in ("unknown", "live")
 
 
 def test_youtube_live_page_is_restricted():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"title": "Live", "type": "live"})
 
-    p = YouTubeProvider(http_client=client_with(handler))
+    p = YouTubeProvider(http_client=client_with(handler), resolver=_public_resolver)
     check = run(p.validate("https://www.youtube.com/watch?v=abc123XYZ"))
     assert check.status == STATUS_RESTRICTED
     assert check.reason
+    assert check.metadata is not None and check.metadata.state == "live"
 
 
 def test_youtube_deleted_private_404():
-    p = YouTubeProvider(http_client=client_with(lambda r: httpx.Response(404)))
+    p = YouTubeProvider(http_client=client_with(lambda r: httpx.Response(404)),
+                        resolver=_public_resolver)
     check = run(p.validate("https://youtu.be/abc123XYZ"))
     assert check.status == STATUS_DELETED
     assert check.reason
 
 
 def test_youtube_rate_limited_429():
-    p = YouTubeProvider(http_client=client_with(lambda r: httpx.Response(429)))
+    p = YouTubeProvider(http_client=client_with(lambda r: httpx.Response(429)),
+                        resolver=_public_resolver)
     assert run(p.validate("https://youtu.be/abc123XYZ")).status == STATUS_RATE_LIMITED
 
 
 def test_youtube_server_error_unavailable():
-    p = YouTubeProvider(http_client=client_with(lambda r: httpx.Response(500)))
+    p = YouTubeProvider(http_client=client_with(lambda r: httpx.Response(500)),
+                        resolver=_public_resolver)
     check = run(p.validate("https://youtu.be/abc123XYZ"))
     assert check.status == STATUS_UNAVAILABLE
     assert check.reason
@@ -117,7 +145,7 @@ def test_youtube_malformed_metadata():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"this is not json")
 
-    p = YouTubeProvider(http_client=client_with(handler))
+    p = YouTubeProvider(http_client=client_with(handler), resolver=_public_resolver)
     assert run(p.validate("https://youtu.be/abc123XYZ")).status == STATUS_UNAVAILABLE
 
 
@@ -129,7 +157,7 @@ def test_youtube_network_error_and_timeout():
         raise httpx.ConnectTimeout("timed out")
 
     for handler in (boom, slow):
-        p = YouTubeProvider(http_client=client_with(handler))
+        p = YouTubeProvider(http_client=client_with(handler), resolver=_public_resolver)
         check = run(p.validate("https://youtu.be/abc123XYZ"))
         assert check.status == STATUS_UNAVAILABLE
         # safe message — no internals leaked
@@ -143,7 +171,7 @@ def test_youtube_invalid_video_id_never_calls_network():
         calls.append(request)
         return httpx.Response(200, json={"title": "x", "type": "video"})
 
-    p = YouTubeProvider(http_client=client_with(handler))
+    p = YouTubeProvider(http_client=client_with(handler), resolver=_public_resolver)
     # too-short id → rejected before any request
     check = run(p.validate("https://www.youtube.com/watch?v=ab"))
     assert check.status == STATUS_UNAVAILABLE
@@ -180,20 +208,28 @@ def _helix(vod_id: str | None) -> httpx.Response:
 
 
 def test_twitch_vod_available():
-    p = TwitchProvider(http_client=client_with(lambda r: _helix("123456789")))
+    p = TwitchProvider(http_client=client_with(lambda r: _helix("123456789")),
+                       config=_TEST_TWITCH_CONFIG, resolver=_public_resolver)
     check = run(p.validate("https://twitch.tv/videos/123456789"))
     assert check.status == STATUS_AVAILABLE
     assert check.title == "Twitch VOD"
+    # TASK 011: the official Helix check carries typed metadata
+    assert check.metadata is not None
+    assert check.metadata.provider_id == "123456789"
+    assert check.metadata.duration_seconds == 3600.0
+    assert check.metadata.state == "completed"
 
 
 def test_twitch_channel_style_vod_available():
-    p = TwitchProvider(http_client=client_with(lambda r: _helix("42")))
+    p = TwitchProvider(http_client=client_with(lambda r: _helix("42")),
+                       config=_TEST_TWITCH_CONFIG, resolver=_public_resolver)
     check = run(p.validate("https://twitch.tv/somechannel/videos/42"))
     assert check.status == STATUS_AVAILABLE
 
 
 def test_twitch_deleted_when_absent_from_listing():
-    p = TwitchProvider(http_client=client_with(lambda r: httpx.Response(200, json={"data": []})))
+    p = TwitchProvider(http_client=client_with(lambda r: httpx.Response(200, json={"data": []})),
+                       config=_TEST_TWITCH_CONFIG, resolver=_public_resolver)
     check = run(p.validate("https://twitch.tv/videos/123456789"))
     assert check.status == STATUS_DELETED
     assert check.reason
@@ -201,24 +237,28 @@ def test_twitch_deleted_when_absent_from_listing():
 
 def test_twitch_private_403_and_401():
     for code in (401, 403):
-        p = TwitchProvider(http_client=client_with(lambda r, c=code: httpx.Response(c)))
+        p = TwitchProvider(http_client=client_with(lambda r, c=code: httpx.Response(c)),
+                           config=_TEST_TWITCH_CONFIG, resolver=_public_resolver)
         check = run(p.validate("https://twitch.tv/videos/123456789"))
         assert check.status == STATUS_RESTRICTED
 
 
 def test_twitch_rate_limited_429():
-    p = TwitchProvider(http_client=client_with(lambda r: httpx.Response(429)))
+    p = TwitchProvider(http_client=client_with(lambda r: httpx.Response(429)),
+                       config=_TEST_TWITCH_CONFIG, resolver=_public_resolver)
     assert run(p.validate("https://twitch.tv/videos/123")).status == STATUS_RATE_LIMITED
 
 
 def test_twitch_server_error_unavailable():
-    p = TwitchProvider(http_client=client_with(lambda r: httpx.Response(503)))
+    p = TwitchProvider(http_client=client_with(lambda r: httpx.Response(503)),
+                       config=_TEST_TWITCH_CONFIG, resolver=_public_resolver)
     check = run(p.validate("https://twitch.tv/videos/123"))
     assert check.status == STATUS_UNAVAILABLE
 
 
 def test_twitch_malformed_metadata():
-    p = TwitchProvider(http_client=client_with(lambda r: httpx.Response(200, content=b"oops")))
+    p = TwitchProvider(http_client=client_with(lambda r: httpx.Response(200, content=b"oops")),
+                       config=_TEST_TWITCH_CONFIG, resolver=_public_resolver)
     assert run(p.validate("https://twitch.tv/videos/123")).status == STATUS_UNAVAILABLE
 
 
@@ -226,24 +266,44 @@ def test_twitch_network_error():
     def boom(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("timed out")
 
-    p = TwitchProvider(http_client=client_with(boom))
+    p = TwitchProvider(http_client=client_with(boom),
+                       config=_TEST_TWITCH_CONFIG, resolver=_public_resolver)
     check = run(p.validate("https://twitch.tv/videos/123"))
     assert check.status == STATUS_UNAVAILABLE
     assert "timed out" not in (check.reason or "")
 
 
-def test_twitch_live_urls_restricted_without_network():
+def test_twitch_live_url_online_is_restricted():
+    """TASK 011: live/channel URLs query the official /streams endpoint.
+    Channel ONLINE → restricted (a live stream is not a downloadable VOD)."""
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request)
-        return _helix("1")
+        # /streams?user_login=somechannel → the channel is live
+        return httpx.Response(200, json={"data": [{"id": 1, "user_name": "somechannel"}]})
 
-    p = TwitchProvider(http_client=client_with(handler))
+    p = TwitchProvider(http_client=client_with(handler),
+                       config=_TEST_TWITCH_CONFIG, resolver=_public_resolver)
     for url in ("https://twitch.tv/live/somechannel", "https://twitch.tv/somechannel"):
         check = run(p.validate(url))
         assert check.status == STATUS_RESTRICTED
-    assert calls == []  # live pages are rejected BEFORE any API call
+        assert "live" in (check.reason or "").lower() or "vod" in (check.reason or "").lower()
+    assert len(calls) == 2  # one official /streams call per URL
+    assert all("/streams" in str(c.url) for c in calls)
+
+
+def test_twitch_live_url_offline_is_unavailable():
+    """Channel OFFLINE → the URL has no VOD → unavailable (not restricted)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": []})
+
+    p = TwitchProvider(http_client=client_with(handler),
+                       config=_TEST_TWITCH_CONFIG, resolver=_public_resolver)
+    check = run(p.validate("https://twitch.tv/somechannel"))
+    assert check.status == STATUS_UNAVAILABLE
+    assert check.reason
 
 
 def test_twitch_non_vod_paths_unavailable():
@@ -253,10 +313,28 @@ def test_twitch_non_vod_paths_unavailable():
         calls.append(request)
         return _helix("1")
 
-    p = TwitchProvider(http_client=client_with(handler))
+    p = TwitchProvider(http_client=client_with(handler),
+                       config=_TEST_TWITCH_CONFIG, resolver=_public_resolver)
     # a multi-segment path that is neither a VOD nor a channel page
     check = run(p.validate("https://twitch.tv/directory/browse"))
     assert check.status == STATUS_UNAVAILABLE
+    assert calls == []
+
+
+def test_twitch_unconfigured_reports_honestly_without_network():
+    """TASK 011: an unconfigured deployment does NOT guess at Helix — it
+    reports unavailability and makes zero network calls."""
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return _helix("1")
+
+    p = TwitchProvider(http_client=client_with(handler), resolver=_public_resolver)
+    assert p.is_configured is False
+    check = run(p.validate("https://twitch.tv/videos/123456789"))
+    assert check.status == STATUS_UNAVAILABLE
+    assert "not configured" in (check.reason or "").lower()
     assert calls == []
 
 

@@ -10,7 +10,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from app.config.settings import Settings
-from app.queue.models import ERROR_UNKNOWN
+from app.queue.models import ERROR_PROVIDER_INVALID_URL
 from app.queue.supabase_queue import QueueError
 from app.worker import IngestionWorker
 
@@ -71,7 +71,10 @@ def youtube_job() -> dict:
     job_id = str(uuid4())
     return {
         "id": job_id,
-        "source_type": "youtube",  # Phase 3 ingestion rejects non-upload sources
+        # Phase 8 (TASK 011): dispatched to the provider layer; without a
+        # source URL it fails permanently with a provider input error
+        # (still before ANY network or storage traffic).
+        "source_type": "youtube",
         "source_path": None,
     }
 
@@ -115,7 +118,7 @@ def test_worker_claims_processes_and_stops(tmp_path):
             job_id, worker_id, category, message, permanent = queue.fail_calls[0]
             assert job_id == job["id"]
             assert worker_id == worker.worker_id
-            assert category == ERROR_UNKNOWN
+            assert category == ERROR_PROVIDER_INVALID_URL
             assert permanent is True
             # ...wait for the processing task to fully drain...
             await wait_until(lambda: worker.active_jobs == 0)

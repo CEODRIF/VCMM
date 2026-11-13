@@ -14,6 +14,7 @@ from app.config.settings import Settings
 from app.processors.ingestion import IngestionProcessor, is_terminal_status
 from app.queue.models import (
     ERROR_CORRUPT_MEDIA,
+    ERROR_PROVIDER_INVALID_URL,
     ERROR_STORAGE_DOWNLOAD,
     ERROR_UNKNOWN,
     JobStatus,
@@ -167,16 +168,33 @@ def test_missing_source_path_fails_permanently(ffprobe_bin, tmp_path):
     assert storage.downloads == []
 
 
-def test_non_upload_source_type_fails_permanently(ffprobe_bin, tmp_path):
+def test_non_upload_source_type_dispatch(ffprobe_bin, tmp_path):
+    """Phase 8 (TASK 011): provider source types dispatch to the provider
+    layer; UNREGISTERED types keep the original Phase 3 contract.
+
+    Both outcomes are still PERMANENT failures with zero storage traffic —
+    the guarantee this test existed for is intact, the categorization is
+    now honest (a youtube job without a URL is a provider input error,
+    not 'unknown')."""
     queue, storage = FakeQueue(), FakeStorage()
     processor = IngestionProcessor(make_settings(tmp_path, ffprobe_bin), queue, storage)
 
-    run(processor.process_job(make_job(source_type="youtube")))
+    run(processor.process_job(make_job(source_type="youtube")))  # no source_url
 
     assert len(queue.fail_calls) == 1
-    assert queue.fail_calls[0][2] == ERROR_UNKNOWN
+    assert queue.fail_calls[0][2] == ERROR_PROVIDER_INVALID_URL
     assert queue.fail_calls[0][4] is True
     assert storage.downloads == []
+
+    queue2, storage2 = FakeQueue(), FakeStorage()
+    processor2 = IngestionProcessor(make_settings(tmp_path, ffprobe_bin), queue2, storage2)
+
+    run(processor2.process_job(make_job(source_type="vimeo")))  # no such provider
+
+    assert len(queue2.fail_calls) == 1
+    assert queue2.fail_calls[0][2] == ERROR_UNKNOWN
+    assert queue2.fail_calls[0][4] is True
+    assert storage2.downloads == []
 
 
 def test_progress_rejection_aborts_without_any_state_write(ffprobe_bin, tmp_path):

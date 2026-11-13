@@ -18,9 +18,12 @@ const httpUrl = z
 
 const YOUTUBE_PATH = /\/(watch|shorts|live|embed)/;
 
+/** Canonical Twitch VOD path shapes (strict; live/channel URLs are NOT VODs). */
+const TWITCH_VOD_PATH = /^\/(?:[a-z0-9_]{1,25}\/)?videos\/\d{1,15}$/;
+
 export const createJobSchema = z
   .object({
-    sourceType: z.enum(["youtube", "upload"]),
+    sourceType: z.enum(["youtube", "twitch", "upload"]),
     youtubeUrl: httpUrl
       .optional()
       .refine((value) => {
@@ -38,6 +41,20 @@ export const createJobSchema = z
         }
       }, "must be a YouTube URL")
       .optional(),
+    twitchUrl: httpUrl
+      .optional()
+      .refine((value) => {
+        if (!value) return true;
+        try {
+          const url = new URL(value);
+          const host = url.hostname.toLowerCase().replace(/^www\./, "");
+          if (host !== "twitch.tv" && host !== "m.twitch.tv") return false;
+          return TWITCH_VOD_PATH.test(url.pathname);
+        } catch {
+          return false;
+        }
+      }, "must be a Twitch VOD URL")
+      .optional(),
     fileName: z
       .string()
       .min(1)
@@ -50,10 +67,18 @@ export const createJobSchema = z
     clipDurationSeconds: z.number().int().min(clips.minSeconds).max(clips.maxSeconds),
     captionsEnabled: z.boolean().default(true),
   })
-  .refine((data) => (data.sourceType === "youtube" ? Boolean(data.youtubeUrl) : Boolean(data.fileName)), {
-    message: "youtube sourceType requires youtubeUrl; upload requires fileName",
-    path: ["sourceType"],
-  });
+  .refine(
+    (data) => {
+      if (data.sourceType === "youtube") return Boolean(data.youtubeUrl);
+      if (data.sourceType === "twitch") return Boolean(data.twitchUrl);
+      return Boolean(data.fileName);
+    },
+    {
+      message:
+        "youtube sourceType requires youtubeUrl; twitch requires twitchUrl; upload requires fileName",
+      path: ["sourceType"],
+    }
+  );
 
 export type CreateJobInput = z.infer<typeof createJobSchema>;
 

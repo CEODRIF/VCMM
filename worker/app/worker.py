@@ -96,6 +96,8 @@ class IngestionWorker:
         if self._active:
             logger.info("waiting for %d active job(s) to finish or release their leases", len(self._active))
             await asyncio.gather(*list(self._active), return_exceptions=True)
+        # TASK 011: release provider-layer resources (token clients).
+        await self._ingestion.aclose()
         logger.info("worker %s stopped", self._worker_id)
 
     # -- internals -------------------------------------------------------------

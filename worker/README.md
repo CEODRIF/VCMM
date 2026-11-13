@@ -75,11 +75,19 @@ gone; the size cap remains as the disk bound):
   `chunks_per_claim` bounds each invocation; a finished job's re-run is a
   no-op. In-loop wiring into `AnalysisProcessor` is a documented next step
   (`docs/stream-intelligence.md` §11) — Phases 4-6 are unchanged.
-- `app/providers/` — source adapters OUTSIDE the pipeline: YouTube/Twitch
-  validation-only (keyless oEmbed / Helix; they REFUSE materialization
-  explicitly — no support is claimed without an authorized path), upload
-  fully implemented (probe + injected bounded download). No yt-dlp, no DRM
-  bypass, no network guessing.
+- `app/providers/` — source adapters OUTSIDE the pipeline (Phase 8, TASK 011):
+  YouTube/Twitch metadata via OFFICIAL APIs only (oEmbed keyless / Data API v3
+  with API key or OAuth refresh-token; Helix with Client-Id or app-access
+  token) + typed `NormalizedSource` metadata + availability states; they
+  REFUSE media materialization explicitly (the official APIs expose no
+  media-download endpoint — no support is claimed, no workaround exists),
+  upload fully implemented (probe + injected bounded download).
+  `http_guard.py` = SSRF-safe HTTP (allowlist, DNS revalidation, private-IP
+  rejection, bounded redirects, header allowlist, chunked streaming).
+  `materialization.py` = provider-independent authorized-transfer service
+  (streaming → private bucket → lease-guarded pin → shared tail).
+  `errors.py` = typed, auto-redacted provider errors. No yt-dlp, no cookies,
+  no DRM bypass, no scraping, no network guessing.
 - **Source-preserved frame rate**: the renderer measures the source's
   average fps and renders at that rate — fractional NTSC included
   (23.976/29.97/55/59.94) — capped at `WORKER_RENDER_FPS_HIGH` (60); the
@@ -305,6 +313,131 @@ startup (see `app/config/settings.py`):
 | `WORKER_CAPTION_MARGIN_V` | `520` | Distance of the caption block from the bottom edge (60-1500) |
 | `WORKER_CAPTION_WORDS_PER_LINE` | `3` | Consecutive words per on-screen line (1-8) |
 | `WORKER_CAPTION_UPPERCASE` | `true` | Uppercase Latin words (Arabic/CJK never transformed) |
+| `WORKER_SOURCE_PROVIDERS_ENABLED` | `true` | Phase 8 (TASK 011): master switch for provider jobs; OFF → youtube/twitch jobs fail permanently with a clear "disabled" error, uploads unaffected |
+| `WORKER_YOUTUBE_API_KEY` | – | Phase 8: official YouTube Data API v3 key (server-side; sent in the `X-Goog-Api-Key` header, NEVER the URL); optional — without it, keyless oEmbed metadata (partial) still works |
+| `WORKER_YOUTUBE_OAUTH_CLIENT_ID` / `_CLIENT_SECRET` / `_REFRESH_TOKEN` | – | Phase 8: OAuth user-credential flow (lets the USER's authorized context read unlisted/private metadata). All three must be set together (validated) or none. Server-side only |
+| `WORKER_YOUTUBE_OAUTH_SCOPES` | `openid` | Phase 8: minimum scopes for metadata-only access (0-500 chars, validated) |
+| `WORKER_TWITCH_CLIENT_ID` / `_CLIENT_SECRET` | – | Phase 8: official Twitch application credentials. Client id alone = Client-Id header mode (official minimum for PUBLIC VOD metadata); id + secret = app-access-token flow (client_credentials) |
+| `WORKER_TWITCH_API_BASE` / `WORKER_TWITCH_OAUTH_BASE` | official endpoints | Phase 8: overridable for tests/private mirrors |
+| `WORKER_PROVIDER_REQUEST_TIMEOUT_SECONDS` | `10` | Phase 8: provider API + token-exchange timeout (0-120) |
+| `WORKER_PROVIDER_MAX_RETRIES` / `WORKER_PROVIDER_RETRY_BACKOFF_SECONDS` | `2` / `1.5` | Phase 8: bounded retries for TRANSIENT provider failures only (0-5 / 0-60) |
+| `WORKER_MATERIALIZE_MAX_SOURCE_BYTES` | `2 GiB` | Phase 8: hard cap on materialized sources (≥ 1 MiB) |
+| `WORKER_MATERIALIZE_MAX_REDIRECTS` | `3` | Phase 8: cap on transfer redirects (each hop re-validated; 0-8) |
+| `WORKER_MATERIALIZE_CHUNK_BYTES` | `1 MiB` | Phase 8: streaming chunk size (64 KiB-16 MiB) — never the whole file in memory |
+| `WORKER_MATERIALIZE_MAX_DURATION_SECONDS` | – (no cap) | Phase 8: optional duration gate for materialized sources (≥ 0); default preserves the TASK 007 no-duration-cap decision |
+
+## Source providers (Phase 8, TASK 011)
+
+Provider-independent source layer: the pipeline receives NORMALIZED source
+files and never learns where a source came from. Ingestion dispatches
+`upload` jobs exactly as before and routes `youtube`/`twitch` jobs through
+this layer: gate → official validation/metadata → typed failure or the
+authorized materialization path → the SAME download/probe/complete tail as
+uploads.
+
+### Supported URL formats (strict; lookalikes rejected)
+
+| Provider | Accepted forms | Rejected |
+| --- | --- | --- |
+| YouTube | `https://(www./m./music.)youtube.com/(watch?v=\|shorts/\|live/\|embed/)ID`, `https://youtu.be/ID` (ID: 11 chars `[A-Za-z0-9_-]`) | channels (`@name`), playlists, bare `/ID`, other hosts/schemes |
+| Twitch | `https://(www./m.)twitch.tv/videos/{vodId}`, `https://(www./m.)twitch.tv/{channel}/videos/{vodId}`; live/channel URLs (`/live/{channel}`, `/{channel}`) are validated (online → restricted "wait for the VOD", offline → unavailable) | non-VOD paths, lookalike hosts, other schemes |
+
+### Capabilities — what is officially supported (be precise)
+
+| Provider | Metadata | States distinguished | Materialization |
+| --- | --- | --- | --- |
+| YouTube, unconfigured | **oEmbed keyless** (official): title, author, type → partial (`NormalizedSource` with unknowns honestly unknown; no duration) | available / live (restricted) / deleted (404) / rate-limited (429) / unavailable (5xx, malformed) | **NO** — official APIs expose no media-download endpoint → typed permanent `materialization_unsupported`, "upload the file directly" |
+| YouTube + `WORKER_YOUTUBE_API_KEY` | **Data API v3** `videos` (snippet + contentDetails + liveStreamingDetails): duration (IS-8601), publication, creator, thumbnail, definition | completed / live / scheduled / private / rejected / processing / deleted + HTTP mapping (403→restricted, 404→deleted, 429→rate-limited, 5xx→unavailable) | **NO** (same refusal) |
+| YouTube + OAuth trio | Data API v3 under the USER's authorized context (unlisted/private readable) | as above | **NO** (same refusal) |
+| Twitch + `WORKER_TWITCH_CLIENT_ID` | **Helix** `/videos` (Client-Id header — the official minimum for public VODs): duration, created, creator, thumbnail, vod_type (archive/highlight) | completed / deleted / private (401/403) / rate-limited (429) / unavailable (5xx, malformed); live online/offline via `/streams` | **NO** — typed permanent refusal |
+| Twitch + id + secret | Helix with cached **app-access token** (client_credentials, POST body only) | as above | **NO** (same refusal) |
+| Twitch, unconfigured | **Honest unavailability, zero network calls** (never a misleading 401-based guess) | unavailable ("not configured on this deployment") | **NO** |
+| Upload | FFprobe on the stored object | — | **YES** (the fully implemented reference path) |
+
+**Mocked tests vs live operations.** All provider tests are deterministic and
+offline (httpx.MockTransport + injected DNS resolvers; no live credentials).
+They prove the contract, state mapping, OAuth flow shape, and security
+guards — they do NOT prove live YouTube/Twitch API behavior. Live metadata
+calls work when an operator configures official credentials (free-tier, no
+spend); **live materialization of platform URLs has NOT been and cannot be
+verified by this codebase** — no official mechanism exists, so it is exposed
+as unsupported, not simulated.
+
+### OAuth / credential setup (server-side only)
+
+- **YouTube API key** (easiest, public metadata): create an API key for the
+  YouTube Data API v3 in Google Cloud; set `WORKER_YOUTUBE_API_KEY`. Sent via
+  the official `X-Goog-Api-Key` header — never in URLs, never logged.
+- **YouTube OAuth** (unlisted/private metadata): an OAuth client (web) with
+  the user flow + a refresh token for the user; scopes minimum `openid`. Set
+  all three `WORKER_YOUTUBE_OAUTH_*` variables (validated as a trio — partial
+  configuration fails startup). Token exchange is form-encoded to the
+  official token endpoint, cached with safe expiry (60 s margin),
+  single-flight; `invalid_grant` and other failures surface as a typed
+  PERMANENT `provider_unauthorized` with a redacted message (a retry cannot
+  fix credentials).
+- **Twitch**: create a Twitch app (no redirect flow needed).
+  `WORKER_TWITCH_CLIENT_ID` alone = Client-Id header mode (public VOD
+  metadata only). Add `WORKER_TWITCH_CLIENT_SECRET` for the app-access-token
+  flow (client_credentials, cached). NO OAuth application is created or
+  configured by this codebase — that is an operator action, explicit, out of
+  scope.
+- Secrets are env-only, validated by Pydantic, empty string = not configured,
+  and NEVER logged (credential-shaped text is redacted in every provider
+  message; see `errors.redact`).
+
+### Materialization service (provider-independent, ready for a licensed path)
+
+`MaterializationService` — the single place an AUTHORIZED media transfer
+becomes a verified source object:
+
+1. provider `materialize()` streams media through the SSRF guard into temp
+   disk (chunked `iter_bytes`, hard size cap, progress + per-chunk cancel
+   probe, bounded retries with `Retry-After`, partial-file cleanup);
+2. `SupabaseStorage.upload_source` streams the file handle (never whole-file
+   bytes) into the private `clipforge-sources` bucket at a SERVER-GENERATED
+   path `sources/{job}/original/{uuid}.mp4` (UUID-validated job id — no path
+   traversal; upsert disabled — no duplicate objects);
+3. lease-guarded `set_job_source` pins the path on the owned `validating`
+   job (ownership lost → abandon, bounded orphan documented);
+4. the shared ingestion tail downloads the stored object, probes the ACTUAL
+   bytes with FFprobe, and completes — identical to direct uploads.
+   Idempotent re-claim: an already-pinned job skips the transfer and
+   re-verifies (duplicate detection + interrupted-transfer recovery).
+
+### Security boundaries (SSRF and secrets)
+
+`http_guard.SafeHttpClient` is the ONLY network path for provider calls:
+
+- host allowlist per provider (official endpoints only); http(s) only; no
+  userinfo; standard ports (80/443) only; control characters rejected;
+- literal-IP normalization (decimal/octal/hex encodings fail closed) and DNS
+  revalidation BEFORE EVERY request and EVERY redirect hop — every resolved
+  answer must be public (private/loopback/link-local incl. the
+  cloud-metadata address/reserved/multicast/unspecified/site-local all
+  refused; a mixed public+private answer poisons the set);
+- redirects are manual, bounded (`WORKER_MATERIALIZE_MAX_REDIRECTS`), each
+  hop re-validated, RFC 9110 method switching (301/302/303 → GET);
+- header allowlist only (`accept`, `authorization`, `client-id`,
+  `x-goog-api-key`) — no arbitrary user-supplied headers;
+- tokens/keys travel in headers or form bodies only — never in URLs;
+- `redact()` scrubs credential-shaped text (authorization/bearer,
+  access/refresh tokens, client secrets, cookies, signed-URL tokens) from
+  every message that can reach logs or job error records.
+
+### Error categories (typed, safe, categorized)
+
+Provider codes → queue categories (permanent vs retryable): invalid URL /
+unsupported provider → `provider_invalid_url` (permanent); unauthorized →
+`provider_unauthorized` (permanent); metadata unavailable →
+`provider_metadata_unavailable` (retryable); materialization unsupported →
+`materialization_unsupported` (permanent); rate limited →
+`provider_rate_limited` (retryable); provider unavailable/disabled →
+`provider_unavailable` (permanent); source restricted/expired →
+`source_rejected` (permanent); size/duration exceeded → `source_too_large` /
+`source_too_long` (permanent); transfer interrupted → `transfer_interrupted`
+(retryable); storage failure → `source_upload_failed` (retryable); cancelled →
+no failure write (lease-safe abandon).
 
 ## Queue contract (Phases 3-5)
 
@@ -351,7 +484,9 @@ worker/app/
 ├── validation/    # FFprobe media validation (container/streams; no source-duration cap since TASK 007)
 ├── intel/         # Stream intelligence (Phase 7): chunk plan, audio/visual features,
 │                  #   detectors, fusion, selection, checkpoints store, pipeline, testing double
-├── providers/     # Source adapters (Phase 7): protocol, upload (full), youtube/twitch (validation-only)
+├── providers/     # Source adapters (Phase 7-8): protocol, models, typed errors, SSRF-safe HTTP,
+                  #   materialization service, registry; upload (full), youtube/twitch (official-API
+                  #   metadata, explicit materialization refusal)
 ├── worker.py      # Ingestion loop (claim, concurrency, backoff, shutdown)
 ├── cleanup.py     # Manual artifact purge CLI (Phase 6; retention policy, idempotent)
 └── config/        # Settings + structured logging

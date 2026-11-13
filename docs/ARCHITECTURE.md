@@ -73,9 +73,12 @@ Implemented in Phase 2:
 - `DELETE /api/access` — destroys the session row and clears the cookie.
 - `POST /api/v1/jobs` — session required; re-validates the payload server-side
   (zod); inserts a `jobs` row owned by the verified session. Upload jobs start
-  in `uploading` with a reserved per-job storage location; YouTube jobs
-  require an authorized source provider and return a clear 503 when none is
-  configured (no job row is created).
+  in `uploading` with a reserved per-job storage location. YouTube/Twitch jobs
+  pass a two-stage capability gate (Phase 8, TASK 011): the provider must be
+  configured (`isAvailable()`) AND able to materialize media through an
+  authorized mechanism (`supportsMaterialization()`); either false → clear
+  503 with a distinct message and NO job row. Metadata availability never
+  implies materialization authorization.
 - `GET /api/v1/jobs` — session required; lists only the session's jobs.
 - `GET /api/v1/jobs/[id]` — session required; returns the job only if it is
   owned by the session; otherwise the same 404 as a missing id
@@ -294,7 +297,7 @@ Modules and their phases:
 | `app/config` | Pydantic settings (env-validated) + JSON structured logging | 1 / 4 / 5 |
 | `app/cleanup.py` | Manual artifact purge CLI (Phase 6): retention-policy candidates → job-scoped storage deletes → guarded `purged_at` marker; idempotent, NOT scheduled | 6 (done) |
 | `app/intel` | Stream intelligence (Phase 7): deterministic overlap chunk plan + midpoint ownership, bounded per-chunk decodes, numpy audio features (RMS/ZCR 20 Hz, silence gaps) + FFmpeg-only visual features (scene cuts, motion bursts), detectors, multimodal fusion (loud-alone can never qualify), context-aware selection (silence-snapped, merged, deduped, 60-180 s, ranked), job-scoped checkpoint store, resumable pipeline orchestrator; `facecam/` (Phase 8, TASK 008): optional local-first facecam modality — bounded 1 fps frame extraction, MediaPipe Tasks (CPU, Apache-2.0 models, explicit paths, never downloaded at runtime), persistence-based region detection (no largest-face assumption), measured facial-geometry signals (visual patterns only, never emotion/identity), honest-unavailable fallback, disabled by default; `game_vision/` (Phase 8, TASK 009): optional local OCR modality — bounded ROI frame extraction (FFmpeg crop/scale), direct tesseract-CLI engine (Apache-2.0 system package, explicit binary/tessdata, per-op timeout+kill, never downloaded at runtime), kill-feed transient-text tracking (dedup/fade-merge), scoreboard visibility + observed-value change tracking (no fabrication), stable HUD element detection, conservative gameplay candidates (observed vs heuristic flagged), honest-unavailable fallback, disabled by default; `testing.py` = in-memory reference store for tests/benchmarks; `multimodal/` (Phase 8, TASK 010): optional temporal fusion ENGINE over the four signal families — normalization (quarantine, never crash), sweep-line temporal correlation with three-tier duplicate suppression (evidence independence: same-family/same-kind repeats and OCR re-reads are corroboration, never independent modalities), bounded event graph + distinct-kind sequences, five conservative cross-modal patterns, bounded explainable `heuristic_confidence` (NOT calibrated — TASK 013) with the full calc exposed, size-bounded per-candidate provenance (≤ 8 KiB jsonb), candidate hygiene (measured+clamped boundaries, deterministic suppression, caps) and enforced budgets (events/clusters/graph/sequences/candidates/wall) — a pure function of the persisted events (resumable), disabled by default with byte-identical Phase 7 behavior | 7/8 (done — in-loop wiring is a documented next step, `docs/stream-intelligence.md` §11, §13, §14, §15) |
-| `app/providers` | Source adapters outside the pipeline (Phase 7): protocol + registry (no guessing); upload fully implemented (probe + injected bounded download); YouTube (keyless oEmbed) / Twitch (keyless Helix) validation-ONLY with explicit materialization refusal (`MaterializationUnavailable`). No yt-dlp, no DRM bypass | 7 (done) |
+| `app/providers` | Source adapters outside the pipeline (Phase 7, extended Phase 8/TASK 011): protocol + registry (no guessing); upload fully implemented; YouTube (keyless oEmbed partial + optional Data API v3 via API key `X-Goog-Api-Key` header or OAuth refresh-token flow) and Twitch (official Helix — Client-Id header mode or app-access-token via client_credentials) metadata validation with typed `NormalizedSource` metadata, availability states (completed/live/scheduled/deleted/private/rate-limited/unavailable), and EXPLICIT materialization refusal (`MaterializationUnavailable`) — the official APIs of both platforms expose no media-download endpoint, so platform-URL materialization is honestly unsupported; `http_guard.py` (SSRF-safe HTTP: host allowlist, literal-IP + DNS revalidation before every request/redirect, private/loopback/link-local/reserved rejection, bounded manual redirects, header allowlist, chunked streaming with size cap + cancel probe, retry with Retry-After), `materialization.py` (provider-independent authorized transfer → private bucket → lease-guarded job pin), `errors.py` (typed, auto-redacted provider errors); No yt-dlp, no DRM bypass | 7/8 (done) |
 
 Ingestion loop (Phase 3): poll → `claim_next_job` (atomic) → bounded-
 concurrency processing (semaphore) → download to temp → FFprobe validate →
@@ -439,8 +442,12 @@ with a reason) and ranks by (score, confidence, start). All of this is
 tested, including the interruption→resume definition-of-done test (zero
 reprocessing, final state identical to a clean run). Sources come through
 the `app/providers` registry: upload (fully implemented), YouTube/Twitch
-(validation-only — they refuse materialization explicitly rather than claim
-support). The renderer additionally renders at the MEASURED source fps
+(metadata via official APIs, validation-only for media — they refuse
+materialization explicitly rather than claim support; a FUTURE authorized
+adapter would flow through the same provider-independent materialization
+service: SSRF-guarded streaming → private bucket → lease-guarded pin → the
+identical download/probe/complete tail, so the pipeline stays
+provider-agnostic). The renderer additionally renders at the MEASURED source fps
 (`select_output_fps`: the source rate is preserved — fractional NTSC
 included — capped at `WORKER_RENDER_FPS_HIGH`; no frame duplication, no
 silent clamping in 23.976…60). In-loop integration is DELIVERED (Phase
@@ -501,8 +508,9 @@ ACTIVE `rendering` row. States are defined in `src/config/app.ts` (frontend),
 - **Input validation** at every boundary: zod (API layer), Pydantic (worker),
   shared validators (UI). File names: no traversal, extension whitelist,
   MIME whitelist with extension/MIME cross-check (spoofing guard). YouTube
-  URLs are shape-validated; fetching requires an authorized source provider —
-  the browser never talks to YouTube download endpoints, and no unauthorized
+  URLs are shape-validated; Twitch URLs are canonical-VOD shape-validated
+  (Phase 8); fetching platform media requires an authorized source provider —
+  the browser never talks to platform download endpoints, and no unauthorized
   downloader (yt-dlp, cookies, DRM bypass) exists in this codebase.
 - **Upload size limits**: declared size checked at authorization (413) and
   re-checked against the real object at completion; the worker enforces the
@@ -566,18 +574,23 @@ Phase 3 (ingestion):
 - `src/components/create/creation-form.tsx` → real upload workflow: create
   job → `POST .../upload/authorize` → direct signed-URL PUT (XHR: real
   progress %, cancellation, retry of the same job on failure) →
-  `POST .../upload/complete` → navigate to processing. YouTube submission
-  shows the provider-unavailable 503 message when no authorized provider is
-  configured.
+  `POST .../upload/complete` → navigate to processing. Three source tabs
+  (YouTube URL / Twitch VOD / Upload file); provider submissions show the
+  provider-unavailable or materialization-unsupported 503 message when no
+  authorized materialization path is configured (no job row is created, so
+  there is no misleading job state).
 - `src/components/processing/*` → nine-state rendering (uploading, queued,
   validating, ready, transcribing, analyzing, rendering, completed, failed);
   polling stops at a final state or when the job is parked at `analyzing`
   with detected clips (`clipsCount > 0`).
 - `src/lib/storage/objects.ts` → signed upload URL creation + object
   verification (private bucket, service role).
-- `src/lib/providers/youtube.ts` → authorized-provider interface; the
-  unconfigured provider returns the clear 503. Integration point for an
-  explicitly approved provider is marked in `src/lib/jobs/service.ts`.
+- `src/lib/providers/youtube.ts` + `src/lib/providers/twitch.ts` →
+  authorized-provider interfaces with explicit capability reporting
+  (`isAvailable()` and `supportsMaterialization()` are separate — metadata
+  capability never implies materialization authorization); the unconfigured
+  providers return the clear 503. Integration points for explicitly approved
+  providers are marked in `src/lib/jobs/service.ts`.
 - `worker/app/worker.py` + `app/processors/ingestion.py` +
   `app/queue/supabase_queue.py` + `app/storage/supabase_storage.py` +
   `app/validation/media.py` → the ingestion loop (see above), started via
@@ -679,6 +692,7 @@ Phase 6 (results API & product completion):
 
 | Location | Marker | Lands in |
 | --- | --- | --- |
-| `src/lib/jobs/service.ts` | `INTEGRATION POINT (authorized provider only)` | YouTube source materialization by an explicitly approved provider |
+| `src/lib/jobs/service.ts` | `INTEGRATION POINT (authorized provider only)` | YouTube/Twitch source materialization by an explicitly approved provider |
 | `worker/app/providers/{youtube,twitch}.py` | `MaterializationUnavailable` (explicit refusal) | Twitch/YouTube VOD materialization by an authorized provider — until then those adapters are validation-only and support is NOT claimed |
+| `worker/app/providers/materialization.py` | `MaterializationService` (provider-independent) | The authorized transfer infrastructure a future licensed provider plugs into: SSRF-guarded streaming → private bucket → lease-guarded `set_job_source` pin → the shared download/probe/complete tail (already exercised end-to-end by a fake authorized provider in tests) |
 | `worker/app/intel/pipeline.py` → `app/processors/analysis.py` | Seam documented in `docs/stream-intelligence.md` §11 | Next task: queue-side "incomplete → continue later" transition + the in-loop intel pass (then `candidate_events` + top-N feed the existing clip store; Phase 4 detector stays the fallback) |

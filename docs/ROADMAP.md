@@ -347,6 +347,65 @@ design: [`docs/stream-intelligence.md`](stream-intelligence.md).
 - Note: migration applied to a real Supabase project remains an explicit
   live step (verified development project; never production).
 
+## Phase 8 — YouTube & Twitch Source Providers (TASK 011)
+
+Provider-independent source layer (worker `app/providers/`), delivered on
+branch `feat/task-011-source-providers`:
+
+- **Normalized contract** — `NormalizedSource` (typed, strict, unknown fields
+  stay unknown, secret-shaped `provider_specific` keys rejected, bounded,
+  public-dict projection without URLs) + `ProviderCheck` (availability state:
+  completed/live/scheduled/private/deleted/rate-limited/unavailable) +
+  typed, auto-redacted provider errors (13 spec categories → queue
+  categories, permanent vs retryable).
+- **YouTube** — canonical URL forms (watch/shorts/live/embed/youtu.be);
+  metadata via the OFFICIAL keyless oEmbed endpoint (partial — duration
+  unknown, honestly) or the Data API v3 when configured (API key in the
+  `X-Goog-Api-Key` header — never the URL — or the OAuth refresh-token flow,
+  minimum scope `openid`, cached single-flight token, safe expiry/refresh);
+  state classification (live/scheduled/private/rejected/processing/deleted,
+  403/404/429/5xx mapping, IS-8601 duration parsing).
+- **Twitch** — canonical VOD URL forms; metadata via the OFFICIAL Helix API
+  (Client-Id header mode = the documented minimum for public VODs; id+secret
+  enables the app-access-token client_credentials flow, cached); VOD state
+  (archive/highlight, deleted, private, rate-limited) and live/channel checks
+  via `/streams` (online → restricted "wait for the VOD", offline →
+  unavailable); unconfigured deployments report honestly with zero network
+  calls.
+- **Materialization honesty (strict boundary)** — the official APIs of BOTH
+  platforms expose metadata but NO media-download endpoint. Platform-URL
+  materialization is therefore EXPOSED AS UNSUPPORTED (typed
+  `materialization_unsupported`, permanent, "upload the file directly"),
+  never worked around: no yt-dlp/cookies/DRM bypass/scraping, by design,
+  ever. The provider-independent `MaterializationService` (SSRF-guarded
+  chunked streaming with size cap + progress + cancel probe, bounded retries
+  with Retry-After, streaming upload into the private bucket, lease-guarded
+  job pin, idempotent re-claim, temp cleanup) is fully implemented and tested
+  via a fake authorized provider — the ready gap-filler for a future
+  licensed ingestion path.
+- **SSRF-safe HTTP** (`http_guard`) — host allowlist, no userinfo, standard
+  ports only, control-char rejection, literal-IP + DNS revalidation before
+  EVERY request and EVERY redirect hop (manual redirects, bounded, RFC 9110
+  method switching), all-resolved-answers-must-be-public (private/loopback/
+  link-local/reserved/multicast/unspecified/site-local refused), header
+  allowlist (no arbitrary user-supplied headers), tokens only in headers,
+  secret redaction on every message.
+- **Pipeline** — ingestion dispatch: uploads unchanged (byte-identical tail);
+  provider jobs run gate → official validation → typed failure or the
+  authorized materialization path → the SAME download/probe/complete tail as
+  uploads (the pipeline stays provider-agnostic). No migration (the Phase 7
+  schema already accepts `youtube`/`twitch`/`upload`).
+- **API/UI** — `twitch` source type end-to-end (zod canonical-VOD validation,
+  capability gate: 503 with distinct "not configured" vs "cannot be
+  materialized" messages, no job row), third "Twitch VOD" creation tab,
+  backend tests for the gate, lookalikes, 401, duplicates, and error
+  serialization.
+- **Limits** — zero new runtime dependencies (httpx already present, BSD-3);
+  mocked tests only — NO live provider integration is claimed; live
+  metadata operations are possible when an operator configures official
+  credentials (documented in `worker/README.md`), live materialization is
+  impossible until an explicitly licensed path is approved.
+
 ## Phase 8 — Hardening & launch
 
 - Load testing and queue backpressure.

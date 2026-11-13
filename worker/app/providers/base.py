@@ -38,6 +38,11 @@ class ProviderCheck:
     title: str | None = None
     duration_seconds: float | None = None
     reason: str | None = None        # safe, user-facing explanation
+    #: TASK 011 (additive): the normalized metadata the official check
+    #: produced — ``None`` when the provider was not configured, was
+    #: rate-limited, or the source is not in a state that can carry
+    #: metadata. Unknown fields stay ``None`` inside it (never guessed).
+    metadata: Any = None             # NormalizedSource | None (Any: no import cycle)
 
 
 @runtime_checkable
