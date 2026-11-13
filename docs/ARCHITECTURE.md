@@ -558,6 +558,96 @@ ACTIVE `rendering` row. States are defined in `src/config/app.ts` (frontend),
   `.env.example` contains placeholders. Logs are structured JSON and never
   include credentials, signed URLs or raw file names beyond job ids.
 
+## Operations & observability (TASK 012)
+
+### Queue reliability (audit result: no schema change required)
+
+The queue's safety properties live in the database (migration
+`20261117000000_phase5_rendering.sql`), and TASK 012 verified rather than
+rewrote them:
+
+- **Single ownership** — `claim_next_job` uses `FOR UPDATE SKIP LOCKED`; a job
+  is claimed at most once per moment, and every state write
+  (`renew_job_lease`, `update_job_progress`, `complete_job_*`, `fail_job`,
+  `release_job`) is scoped to `(id, locked_by, status)` inside the RPC, so a
+  worker that loses its lease **cannot** write a final or conflicting state
+  (`fail_job` returns `not_owner` instead of applying).
+- **Crash recovery** — claimable set includes `queued`/`ready` plus
+  active-stage jobs whose lease expired; a dead worker's jobs are re-claimed
+  at the same stage with no duplicate execution (analysis/rendering work is
+  idempotent per stage, and rendering completion requires every clip stored
+  before `completed`).
+- **Bounded retries** — `fail_job` requeues to the stage entry unless the
+  error is permanent, `attempt_count >= max_attempts`, or the per-render
+  budget is exhausted; those terminal paths produce `failed` with a clear
+  `error_category: message` in `last_error` (the existing dead-letter
+  representation). Phase 7b's `analysis_resumes` counter keeps long analyses
+  from being counted as failures.
+- **Worker-side backoff (new)** — claim-path failures back off
+  exponentially with jitter (delay ∈ [base/2, base], base = min(60s,
+  poll × 2^errors, exponent cap 5); reset on success) so a failing database
+  is not polled at full rate by every worker.
+
+### Worker lifecycle
+
+- **Startup**: settings validated by Pydantic; stale `storage/tmp/<job-id>`
+  directories (older than `WORKER_TMP_STALE_SECONDS`, live jobs excluded)
+  are removed; the loop starts only after.
+- **Graceful shutdown (SIGTERM/SIGINT)**: stop claiming → wait up to
+  `WORKER_SHUTDOWN_GRACE_SECONDS` (default 600s, bounded 30–86400) for
+  in-flight jobs → abandon the rest (cancel; subprocesses killed in their
+  `finally` blocks; **no state written** — the lease expires and another
+  worker recovers) → close queue/storage/provider HTTP clients.
+  A completed job is never marked failed by a shutdown.
+- **Resource limits**: `WORKER_CONCURRENCY` job tasks,
+  `WORKER_RENDER_CONCURRENCY` FFmpeg clips in parallel per job, per-operation
+  subprocess timeouts (all killed+awaited), 200 MiB clip size cap, bounded
+  tmp scratch per job, per-chunk intel budgets. Exhaustion surfaces as typed
+  processor errors (bounded retries / honest "unavailable"), never silent
+  drops.
+
+### Observability
+
+- **Structured JSON logs** with `job_id`, `worker_id`, `correlation_id`
+  (one 16-hex id per claim), `stage`, `attempt`, `provider`, `error_code`,
+  `duration_ms`; every message and traceback passes the same redactor as
+  provider errors (OAuth tokens, Authorization/Cookie headers to EOL,
+  service-role/api-key/password/token/secret values, signed storage URLs
+  incl. short signatures).
+- **Metrics**: stdlib registry at `GET /metrics` (Prometheus text).
+  Cardinality is bounded by fixed label domains + a per-family series cap
+  (drop + warn-once); error categories normalize to the queue model's closed
+  set. Counters/gauges: claimed/completed/failed/released/cancelled jobs,
+  queue-wait and processing durations, lease-renewal failures, claim errors,
+  storage failures by operation, provider validations by outcome, active
+  jobs, uptime, consecutive claim errors.
+- **Health**: `GET /health` = liveness (process up). `GET /ready` = real
+  bounded probes (DB select, storage list; 5s each; 30s cache) — ready iff
+  database + storage + ffmpeg are ok; a degraded/disabled **optional**
+  feature (transcription, facecam, game vision) is reported but never gates.
+  Provider config is reported as mode names only (never credentials).
+
+### API hardening
+
+- All JSON POSTs (`POST /api/v1/jobs`, `POST /api/access`,
+  `upload/authorize`, `upload/complete`) read the body through a bounded
+  streaming reader (16 KiB cap; Content-Length fast path; stream cancelled
+  on overflow) → typed `413` instead of unbounded buffering.
+- **Job creation** is rate-limited per verified session (10/minute,
+  `Retry-After` on 429) — unforgeable key, not evadable via IP rotation;
+  access-code attempts remain per-IP (5/15 min). Both 429s send
+  `Retry-After`.
+- Error serialization is unchanged (stable `{error}`; 500 never leaks
+  internals); anti-enumeration and ownership checks are preserved and
+  regression-tested.
+
+**Known operational limitations**: rate-limit windows are per process
+instance (swap to Redis for exact multi-instance limits); metrics live only
+in the worker process (reset on restart — the DB remains the system of
+record); `/ready`'s probe cache can report stale state for up to 30s;
+artifact purge remains a **manual** command (no scheduler wired); a job
+abandoned at shutdown is recovered only when its lease expires.
+
 ## Completed integrations
 
 Phase 2:
