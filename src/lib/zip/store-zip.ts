@@ -129,7 +129,7 @@ function centralRecord(name: Uint8Array, crc: number, size: number, offset: numb
     u32(CENTRAL_SIG),
     u16(20), // version made by
     u16(20), // version needed
-    u16(0x0800), // flags (UTF-8 bit)
+    u16(0x0808), // flags — MUST mirror the local header (bit3 data descriptor + bit11 UTF-8)
     u16(0), // method: stored
     u16(DOS_TIME),
     u16(DOS_DATE),

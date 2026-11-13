@@ -17,6 +17,10 @@ export interface ParsedEntry {
   offset: number;
   data: Uint8Array;
   utf8Flag: boolean;
+  /** General-purpose flag bits as written in the CENTRAL directory. */
+  centralFlags: number;
+  /** General-purpose flag bits as written in the LOCAL file header. */
+  localFlags: number;
 }
 
 export interface ParsedZip {
@@ -78,6 +82,8 @@ export function parseZip(bytes: Uint8Array): ParsedZip {
       offset,
       data,
       utf8Flag: (flags & 0x0800) !== 0,
+      centralFlags: flags,
+      localFlags,
     });
   }
   return { entries, totalBytes: bytes.length };

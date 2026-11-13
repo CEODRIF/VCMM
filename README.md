@@ -187,15 +187,18 @@ Server-side validation is implemented in `src/lib/env.ts` (zod) and
     - `supabase/migrations/20261120000000_phase5b_captions.sql` (Phase 5B — `clips.captions jsonb`: the clip's real word-level timings for subtitle burn-in)
     - `supabase/migrations/20261123000000_phase6_results_retention.sql` (Phase 6 — `jobs.purged_at` marker + retention trigger: 30 days after a terminal transition, only when `expires_at` is NULL)
 
-All seven are executed and asserted against a real PostgreSQL 16 engine (WASM)
+All eight are executed and asserted against a real PostgreSQL 16 engine (WASM)
 in the test suite (`tests/database/rls.test.ts`, `tests/database/queue.test.ts`,
 `tests/database/phase4-queue.test.ts`, `tests/database/storage-buckets.test.ts`,
-`tests/database/phase5-rendering.test.ts`, `tests/database/phase5b-captions.test.ts`),
+`tests/database/phase5-rendering.test.ts`, `tests/database/phase5b-captions.test.ts`,
+`tests/database/phase6-retention.test.ts`),
 including deny-by-default RLS, the queue RPCs' atomicity/lease semantics, the
 Phase 4 stage transitions (incl. crash recovery and the parked state), the
 Phase 5 rendering lifecycle (parked claim → rendering, render-retry requeue,
-crash recovery, the `complete_job_rendering` guard refusing early completion)
-and the private-bucket configuration.
+crash recovery, the `complete_job_rendering` guard refusing early completion),
+the private-bucket configuration and the Phase 6 retention trigger
+(`expires_at` set once on terminal transitions, operator deadlines preserved,
+`purged_at` marker semantics).
 
 Tables: `processing_sessions`, `jobs`, `clips` — all with RLS enabled and no
 anonymous policies (access is mediated exclusively by the server-side API).
