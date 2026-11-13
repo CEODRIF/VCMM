@@ -8,25 +8,28 @@ ClipForge AI is a web application that transforms long-form videos into short-fo
 - Vertical 9:16 output at 1080x1920 (1080p) with modern animated subtitles.
 - Individual downloads and ZIP batch downloads.
 
-> **Status: Phase 6 — results API & product completion.**
-> Rendered clips are now a usable end product: the Results page
-> (`/results?job=<id>`) is wired to a session-protected results API and
-> shows real video previews (short-lived signed URLs, private buckets
-> unchanged), clip titles/durations, per-clip MP4 downloads and
-> "Download all" as a streamed, size-capped ZIP (bounded concurrency,
-> sanitized filenames, cancellation-safe). Every route re-verifies session
-> + job ownership on every request; clips are delivered only after
-> verification against the owning job — no public URLs, no storage paths,
-> no enumeration. Artifacts carry an explicit retention policy (30 days
-> after a job reaches `completed`/`failed`, DB marker, operator deadlines
-> win) and a MANUAL, idempotent, job-scoped worker purge
-> (`python -m app.cleanup`) — nothing destructive is scheduled
-> automatically. (Phases 5A/5B recap: the worker renders each detected
-> clip to exact 1080x1920 H.264+AAC with rotation correction, burns
-> animated word-synchronized subtitles from the REAL transcription
-> (libass, deterministic ASS) into the same FFmpeg command, validates the
-> output contract, uploads to the private `clipforge-clips` bucket and
-> completes the job only through the DB guard.) See `docs/ROADMAP.md`.
+> **Status: Phase 7 — stream intelligence foundation (TASK 007).**
+> The worker can now analyze recordings of ANY duration incrementally:
+> bounded overlap chunks, persisted checkpoints, safe resume after
+> interruption with zero reprocessing, and multimodal candidate ranking
+> from MEASURED audio + visual evidence (a loud sound alone can never
+> qualify). The 8-hour source-duration cap is removed — operational limits
+> (chunk size, per-claim budget, timeouts) are configurable via
+> `WORKER_INTEL_*`. Rendering is source-aware: 60 fps sources render at 60
+> fps, everything else keeps the 30 fps profile (no fake frame rates).
+> Provider adapters (YouTube/Twitch validation-only, upload fully
+> implemented) sit outside the pipeline; nothing claims support it has not
+> implemented AND tested. The in-loop job integration is a deliberate next
+> step (queue "incomplete → continue" transition), documented in
+> `docs/stream-intelligence.md` §11; Phases 1–6 behavior is unchanged.
+> (Phase 6 recap: rendered clips are a usable end product — Results page
+> wired to a session-protected results API with real previews, per-clip
+> downloads and a streamed size-capped ZIP; every route re-verifies session
+> + job ownership on every request; explicit 30-day retention + MANUAL
+> idempotent purge. Phases 5A/5B: exact 1080x1920 H.264+AAC rendering with
+> rotation correction and animated word-synchronized subtitles, validated
+> output contract, DB-guarded completion.) See `docs/ROADMAP.md` and
+> `docs/stream-intelligence.md`.
 
 ## Technology stack
 
@@ -149,7 +152,7 @@ Copy `.env.example` to `.env.local` and fill in what applies. **Never commit rea
  | `ACCESS_CODE_HASH` | **server only** | SHA-256 hash of the shared access code (Phase 2) |
  | `DATABASE_URL` | server | Optional direct Postgres connection |
  | `MAX_UPLOAD_SIZE_BYTES` | server | Upload size cap (default 2 GiB) |
- | `MAX_SOURCE_DURATION_SECONDS` | server | SOURCE duration cap (default 8h; not the 60-180s clip setting) |
+ | `MAX_SOURCE_DURATION_SECONDS` | server | **Inert since TASK 007** — no product-level source-duration cap; recordings are analyzed incrementally (the worker no longer reads it) |
  | `UPLOAD_AUTH_TTL_SECONDS` | server | Upload-authorization TTL (default 900s) |
  | `WORKER_ENVIRONMENT` | worker | `development` / `staging` / `production` |
  | `WORKER_LOG_LEVEL` | worker | `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL` |
@@ -186,22 +189,26 @@ Server-side validation is implemented in `src/lib/env.ts` (zod) and
     - `supabase/migrations/20261117000000_phase5_rendering.sql` (Phase 5A — `jobs.render_attempts` budget, `rendering` stage in the queue RPCs, `complete_job_rendering` guard, clips index)
     - `supabase/migrations/20261120000000_phase5b_captions.sql` (Phase 5B — `clips.captions jsonb`: the clip's real word-level timings for subtitle burn-in)
     - `supabase/migrations/20261123000000_phase6_results_retention.sql` (Phase 6 — `jobs.purged_at` marker + retention trigger: 30 days after a terminal transition, only when `expires_at` is NULL)
+    - `supabase/migrations/20261124000000_phase7_stream_intelligence.sql` (Phase 7 — `processing_checkpoints` + `candidate_events` (worker-owned, deny-by-default RLS, exact retry dedup) and `jobs.source_type` += 'twitch' (additive))
 
-All eight are executed and asserted against a real PostgreSQL 16 engine (WASM)
+All nine are executed and asserted against a real PostgreSQL 16 engine (WASM)
 in the test suite (`tests/database/rls.test.ts`, `tests/database/queue.test.ts`,
 `tests/database/phase4-queue.test.ts`, `tests/database/storage-buckets.test.ts`,
 `tests/database/phase5-rendering.test.ts`, `tests/database/phase5b-captions.test.ts`,
-`tests/database/phase6-retention.test.ts`),
+`tests/database/phase6-retention.test.ts`, `tests/database/phase7-intel.test.ts`),
 including deny-by-default RLS, the queue RPCs' atomicity/lease semantics, the
 Phase 4 stage transitions (incl. crash recovery and the parked state), the
 Phase 5 rendering lifecycle (parked claim → rendering, render-retry requeue,
 crash recovery, the `complete_job_rendering` guard refusing early completion),
-the private-bucket configuration and the Phase 6 retention trigger
+the private-bucket configuration, the Phase 6 retention trigger
 (`expires_at` set once on terminal transitions, operator deadlines preserved,
-`purged_at` marker semantics).
+`purged_at` marker semantics) and the Phase 7 checkpoint/candidate tables
+(done-only status, (job, event_key) retry dedup, per-job cascade, the additive
+`twitch` source type).
 
-Tables: `processing_sessions`, `jobs`, `clips` — all with RLS enabled and no
-anonymous policies (access is mediated exclusively by the server-side API).
+Tables: `processing_sessions`, `jobs`, `clips`, `processing_checkpoints`,
+`candidate_events` — all with RLS enabled and no anonymous policies (access
+is mediated exclusively by the server-side API / service-role worker).
 Storage buckets: `clipforge-sources` (original uploads) and `clipforge-clips`
 (rendered clips, `clips/{job_id}/{clip_id}.mp4`, written by the Phase 5A
 worker) — both **private**, no client policies, service-role-only access.
@@ -329,7 +336,7 @@ pull requests:
    time and bandwidth are bounded — a very large set may be interrupted
    mid-download. The per-clip signed-URL downloads remain the always-available
    fallback (no server proxying at all). A worker-backed artifact store is the
-   documented Phase 7 option if large batches become common; no paid
+   documented Phase 8 option if large batches become common; no paid
    infrastructure was introduced.
 - **Artifact cleanup is manual.** The retention policy (30 days after a
    terminal state, explicit DB marker) and the idempotent purge are
@@ -357,12 +364,12 @@ pull requests:
   browser interruption must re-PUT the whole file (the authorization can be
   re-requested and completion is idempotent, so a retry is always safe).
 - Rate limiting is per-instance (in-memory). On multi-instance Vercel the
-  effective limit is per-instance; a Redis-backed limiter is planned (Phase 7).
+  effective limit is per-instance; a Redis-backed limiter is planned (Phase 8).
 - Worker concurrency is per-process; running several worker replicas is safe
   (claims are atomic in Postgres) but the in-flight view in `/health` is
   per-replica.
-- No monitoring/alerting yet (Phase 7).
+- No monitoring/alerting yet (Phase 8).
 
 ## Roadmap
 
-See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the seven development phases.
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the eight development phases.

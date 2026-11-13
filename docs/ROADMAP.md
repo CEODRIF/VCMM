@@ -1,6 +1,6 @@
 # ClipForge AI — Development Roadmap
 
-Seven phases, in order. Each phase ends with a shippable increment.
+Eight phases, in order. Each phase ends with a shippable increment.
 
 ## Phase 1 — Project foundation ✅ (this commit)
 
@@ -269,7 +269,70 @@ Seven phases, in order. Each phase ends with a shippable increment.
   (verified development project required; none was provisioned in this
   phase), and the purge is an operator action by design until then.
 
-## Phase 7 — Hardening & launch
+## Phase 7 — Stream Intelligence Foundation ✅ (TASK 007, this branch)
+
+Long-form gaming-stream highlight extraction: the system analyzes the
+ENTIRE recording, whatever its duration, in bounded, resumable chunks, and
+ranks candidate clips from measured multimodal evidence. Full audit +
+design: [`docs/stream-intelligence.md`](stream-intelligence.md).
+
+- **No product duration cap** (the old 8 h infrastructure limit is removed;
+  the size cap stays as the disk bound). Operational limits only: chunk
+  size, per-claim budget, decode timeouts — configurable via
+  `WORKER_INTEL_*`.
+- **Chunk engine** (`worker/app/intel/`): deterministic overlap planner,
+  midpoint ownership (a boundary event is seen by both neighbours and
+  persisted by exactly one), per-chunk `-ss/-t` bounded decodes (audio 16 kHz
+  mono WAV ≈ 19 MB at 600 s; visual passes at 2 fps, null muxer, no disk),
+  sequential execution, cancellation + temp cleanup.
+- **Checkpoints + exact dedup**: migration `20261124000000` (additive;
+  `processing_checkpoints` PK (job,chunk) + `candidate_events`
+  PK (job,event_key) + `jobs.source_type` += 'twitch'; deny-by-default RLS,
+  no policies). Events are upserted BEFORE the checkpoint, so a crash in
+  between is a safe re-detect + dedup — proven by tests (zero reprocessing,
+  final state identical to a clean run).
+- **Signals (measured, never fabricated)**: audio energy spikes, bright
+  transients, sustained voice-activity shifts, silence gaps; visual scene
+  cuts (ffmpeg `select='gt(scene,…)'`) and motion bursts (tblend
+  difference). A loud sound alone CANNOT qualify (single-family discount;
+  SFX-only transients ×0.2 → never over the bar). Facecam / OCR / HUD are
+  explicit, documented non-goals of this phase (interfaces reserved).
+- **Fusion + selection**: weighted independent-family scoring (2 families
+  → diversity bonus; confidence = fraction of families), context windows
+  (pre 4 s / post 8 s), silence-gap boundary snap (speech-safe), merge +
+  IoU-0.5 near-duplicate removal, 60–180 s product bounds, 8 heuristic
+  categories (always labeled heuristic) + `unclassified`, ranked by
+  (score, confidence, start).
+- **Rendering**: source-preserved frame rate — the measured source rate is
+  rendered exactly (23.976/24/30/55/59.94/60 all preserved; fractional
+  NTSC passed to `-r` unrounded), capped at 60 (no frame duplication, no
+  silent clamping inside the window; ffprobe-verified output fps, decoded
+  frame counts and A/V sync in the worker integration tests). The rest of
+  the Phase 5A/5B pipeline is untouched.
+- **Providers** (`worker/app/providers/`): protocol + registry, no
+  guessing. YouTube (keyless oEmbed) and Twitch (keyless Helix listing)
+  are VALIDATION-ONLY and refuse materialization explicitly
+  (`MaterializationUnavailable`) — support is not claimed until an
+  authorized materialization path exists. Upload is fully implemented
+  (probe + injected bounded download). No yt-dlp, no DRM bypass.
+- **Benchmarks** (`worker/benchmarks/`): deterministic synthetic fixture
+  with 6 ground-truth events (4 boundary-straddling); JSON report with
+  `measured` vs `targets` strictly separated. Synthetic results are labeled
+  as such; **human-annotated real-VOD evaluation remains OUTSTANDING**
+  (framework ready, no real annotated fixtures exist in the repo).
+- **Tests**: +145 worker tests (chunk plan, signals, audio, visual,
+  detectors, fusion, selection, checkpoints, pipeline recovery, providers,
+  benchmarks, config/media/render updates) — full worker suite 477 passed;
+  +9 pglite schema tests; frontend regression 279 passed.
+- **Integration seam (next task, deliberately NOT wired here)**: the
+  in-loop `AnalysisProcessor` hook needs a queue-side "incomplete, continue
+  later" transition (distinct from the Phase 5A parked state) —
+  `docs/stream-intelligence.md` §11. Until then Phases 4-6 behave exactly
+  as before; this phase adds capability without changing any live path.
+- Note: migration applied to a real Supabase project remains an explicit
+  live step (verified development project; never production).
+
+## Phase 8 — Hardening & launch
 
 - Load testing and queue backpressure.
 - Observability: structured metrics, alerting, request tracing.

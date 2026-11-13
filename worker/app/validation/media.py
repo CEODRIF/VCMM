@@ -6,8 +6,10 @@ presence, audio availability, codecs, duration, resolution and file size are
 measured and validated against explicit infrastructure limits.
 
 Note: the product supports REQUESTED clip durations of 60-180 seconds — that
-is a different setting from the SOURCE video duration, which is bounded only
-by the configured infrastructure limit (``max_source_duration_seconds``).
+is a different setting from the SOURCE video duration. Since TASK 007 there is
+NO product-level source-duration cap: long recordings are analyzed
+incrementally (bounded chunks, resumable). The only source limit is the
+storage size cap, which bounds disk — not duration.
 """
 
 from __future__ import annotations
@@ -23,7 +25,6 @@ from ..queue.models import (
     ERROR_INVALID_FILE,
     ERROR_NO_VIDEO_STREAM,
     ERROR_SOURCE_TOO_LARGE,
-    ERROR_SOURCE_TOO_LONG,
     ERROR_UNSUPPORTED_FORMAT,
 )
 
@@ -63,6 +64,24 @@ class MediaInfo:
     has_audio: bool
     audio_codec: str | None
     file_size_bytes: int
+    #: Measured average frame rate of the video stream (TASK 007); None when
+    #: ffprobe could not report one (variable-rate sources without avg).
+    avg_fps: float | None = None
+
+
+def parse_frame_rate(value: object) -> float | None:
+    """Parses ffprobe's ``"num/den"`` rate field into a float (None if bad)."""
+    if not isinstance(value, str) or "/" not in value:
+        return None
+    try:
+        num, den = value.split("/", 1)
+        den_f = float(den)
+        if den_f <= 0:
+            return None
+        rate = float(num) / den_f
+    except (ValueError, ZeroDivisionError):
+        return None
+    return rate if rate > 0 else None
 
 
 async def probe_media(ffprobe_path: str, file_path: Path, timeout_seconds: float) -> MediaInfo:
@@ -146,6 +165,10 @@ async def probe_media(ffprobe_path: str, file_path: Path, timeout_seconds: float
     if width <= 0 or height <= 0:
         raise MediaValidationError(ERROR_CORRUPT_MEDIA, "Media resolution could not be determined.")
 
+    avg_fps = parse_frame_rate(video_stream.get("avg_frame_rate")) or parse_frame_rate(
+        video_stream.get("r_frame_rate")
+    )
+
     return MediaInfo(
         container=container,
         duration_seconds=round(duration, 3),
@@ -156,24 +179,22 @@ async def probe_media(ffprobe_path: str, file_path: Path, timeout_seconds: float
         has_audio=audio_stream is not None,
         audio_codec=str(audio_stream.get("codec_name")) if audio_stream else None,
         file_size_bytes=file_path.stat().st_size,
+        avg_fps=round(avg_fps, 3) if avg_fps is not None else None,
     )
 
 
-def validate_media(info: MediaInfo, max_source_duration_seconds: float, max_upload_size_bytes: int) -> dict[str, object]:
+def validate_media(info: MediaInfo, max_upload_size_bytes: int) -> dict[str, object]:
     """Validates measured media info; returns the safe metadata payload.
 
-    Duration here is the SOURCE video duration — bounded by the
-    infrastructure limit, NOT by the 60-180s requested clip length.
+    The only SOURCE limit is the storage size cap (bounds disk, not time).
+    There is deliberately NO product-level duration cap since TASK 007 —
+    long recordings are processed incrementally in bounded chunks. The
+    60-180s requested CLIP length is a separate, product-level setting.
     """
     if info.file_size_bytes > max_upload_size_bytes:
         raise MediaValidationError(
             ERROR_SOURCE_TOO_LARGE,
             f"Video file is larger than the {max_upload_size_bytes}-byte infrastructure limit.",
-        )
-    if info.duration_seconds > max_source_duration_seconds:
-        raise MediaValidationError(
-            ERROR_SOURCE_TOO_LONG,
-            f"Video is longer than the {int(max_source_duration_seconds)}-second infrastructure limit.",
         )
     if not info.has_video:
         raise MediaValidationError(ERROR_NO_VIDEO_STREAM, "No video track was found in the file.")
@@ -187,4 +208,5 @@ def validate_media(info: MediaInfo, max_source_duration_seconds: float, max_uplo
         "has_audio": info.has_audio,
         "audio_codec": info.audio_codec,
         "file_size_bytes": info.file_size_bytes,
+        "avg_fps": info.avg_fps,
     }

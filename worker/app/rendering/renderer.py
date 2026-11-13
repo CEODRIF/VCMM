@@ -41,10 +41,11 @@ from pathlib import Path
 from typing import Optional
 
 from ..queue.models import ERROR_RENDER_FAILED
+from ..validation.media import parse_frame_rate
 from .base import BaseRenderer, RenderSpec
 from .captions import CaptionsError, build_captions_ass, filter_escape, write_ass
 from .ffmpeg import FFmpegError, run_ffmpeg
-from .profiles import RenderProfile, normalize_rotation_cw
+from .profiles import RenderProfile, normalize_rotation_cw, select_output_fps
 from .validation import mp4_rotation_degrees, rotation_of
 
 #: Explicit filter that bakes a clockwise source rotation into the pixels,
@@ -70,12 +71,24 @@ class FFmpegRenderer(BaseRenderer):
         profile: Optional[RenderProfile] = None,
         timeout_seconds: float = 900.0,
         probe_timeout_seconds: float = 60.0,
+        fps_low: float = 30,
+        fps_high: float = 60,
+        fps_high_source_threshold: float = 55.0,
     ) -> None:
         self._ffmpeg = ffmpeg_path
         self._ffprobe = ffprobe_path
         self._profile = profile or RenderProfile()
         self._timeout = timeout_seconds
         self._probe_timeout = probe_timeout_seconds
+        # Source-preserved frame-rate selection (TASK 007, Priority 4): the
+        # clip renders at the MEASURED source rate (fractional NTSC rates
+        # included), capped at ``fps_high``; ``fps_low`` is only the fallback
+        # when the source rate is unknown. ``fps_high_source_threshold`` is
+        # kept for settings compatibility (legacy two-tier design) and is no
+        # longer used by the selection.
+        self._fps_low = fps_low
+        self._fps_high = fps_high
+        self._fps_high_source_threshold = fps_high_source_threshold
 
     @property
     def profile(self) -> RenderProfile:
@@ -103,11 +116,19 @@ class FFmpegRenderer(BaseRenderer):
         output = Path(output_path)
         output.parent.mkdir(parents=True, exist_ok=True)
 
-        width, height, rotation = await self._probe_source(source)
+        width, height, rotation, source_fps = await self._probe_source(source)
         cw = normalize_rotation_cw(rotation)
         base_plan = self._profile.video_filter(width, height, cw)
         rotate_filter = _ROTATION_FILTERS[cw]
         filter_chain = f"{rotate_filter},{base_plan}" if rotate_filter else base_plan
+        # Preserve the MEASURED source rate (TASK 007, Priority 4): 23.976 /
+        # 24 / 30 / 55 / 59.94 / 60 fps sources each render at their own
+        # rate — the output never exceeds the measured rate, so frames are
+        # never duplicated to fake a higher rate; unknown rates keep the
+        # profile default.
+        out_fps = select_output_fps(
+            source_fps, self._fps_low, self._fps_high, self._fps_high_source_threshold
+        )
 
         # Captions (Phase 5B): real words only, prepared BEFORE the process
         # starts (deterministic), written into the per-job temp dir, and
@@ -142,7 +163,7 @@ class FFmpegRenderer(BaseRenderer):
             "-noautorotate",
             "-i", str(source),
             "-vf", filter_chain,
-            *self._profile.ffmpeg_video_args(),
+            *self._profile.ffmpeg_video_args(out_fps),
             *self._profile.ffmpeg_audio_args(),
             *self._profile.ffmpeg_container_args(),
             str(output),
@@ -154,8 +175,8 @@ class FFmpegRenderer(BaseRenderer):
                 ass_path.unlink(missing_ok=True)
         return str(output)
 
-    async def _probe_source(self, source: Path) -> tuple[int, int, float]:
-        """Measures the source video geometry + rotation (raw bytes, never trusted)."""
+    async def _probe_source(self, source: Path) -> tuple[int, int, float, float | None]:
+        """Measures the source video geometry + rotation + avg fps (raw bytes, never trusted)."""
         if not source.is_file() or source.stat().st_size == 0:
             raise FFmpegError(ERROR_RENDER_FAILED, "source file is missing or empty")
 
@@ -210,4 +231,8 @@ class FFmpegRenderer(BaseRenderer):
         mp4_rotation = mp4_rotation_degrees(source)
         if mp4_rotation is not None:
             rotation = mp4_rotation
-        return width, height, rotation
+        # Measured average frame rate (drives source-aware output fps).
+        source_fps = parse_frame_rate(video.get("avg_frame_rate")) or parse_frame_rate(
+            video.get("r_frame_rate")
+        )
+        return width, height, rotation, source_fps

@@ -57,6 +57,40 @@ plan — no second pipeline):
   FFmpeg build with libharfbuzz (the CI apt build has it; the local
   ffmpeg-static does not — isolated glyphs). No fonts are bundled.
 
+Phase 7 (TASK 007) adds the **stream-intelligence foundation** — long-form
+analysis with NO product-level source-duration cap (the old 8 h limit is
+gone; the size cap remains as the disk bound):
+
+- `app/intel/` — the chunk engine: deterministic overlap planning, midpoint
+  ownership (boundary events seen by both neighbours, persisted by exactly
+  one), bounded per-chunk decodes (audio: mono 16 kHz WAV ≈ 19 MB at 600 s;
+  visual: two 2 fps null-muxer passes, no disk), numpy signal features,
+  detectors, multimodal fusion (a loud sound alone CANNOT qualify —
+  single-family discount, SFX-only transients ×0.2) and context-aware clip
+  selection (silence-snapped boundaries, merge, IoU dedup, 60–180 s bounds,
+  8 heuristic categories, ranked).
+- **Resumable & crash-safe**: checkpoints + candidate events persist in the
+  Phase 7 tables (migration `20261124000000`); events are upserted BEFORE
+  the chunk checkpoint, so a crash in between re-detects and exact-dedups.
+  `chunks_per_claim` bounds each invocation; a finished job's re-run is a
+  no-op. In-loop wiring into `AnalysisProcessor` is a documented next step
+  (`docs/stream-intelligence.md` §11) — Phases 4-6 are unchanged.
+- `app/providers/` — source adapters OUTSIDE the pipeline: YouTube/Twitch
+  validation-only (keyless oEmbed / Helix; they REFUSE materialization
+  explicitly — no support is claimed without an authorized path), upload
+  fully implemented (probe + injected bounded download). No yt-dlp, no DRM
+  bypass, no network guessing.
+- **Source-preserved frame rate**: the renderer measures the source's
+  average fps and renders at that rate — fractional NTSC included
+  (23.976/29.97/55/59.94) — capped at `WORKER_RENDER_FPS_HIGH` (60); the
+  output never exceeds the measured rate, so frames are never duplicated
+  to fake a rate and nothing in 23.976…60 is silently clamped. Unknown
+  rates keep the 30 fps profile default.
+- **Benchmarks** (`worker/benchmarks/`, `python -m benchmarks.run`): a
+  deterministic synthetic fixture with ground-truth events; JSON report
+  separating measured from targets. Synthetic ≠ real-world accuracy —
+  human-annotated real-VOD evaluation is an outstanding follow-up.
+
 ## Storage model — read this first
 
 **Supabase Storage is the durable source of truth.** The worker's local disk
@@ -77,6 +111,9 @@ before the temp file is removed.
   project (queue RPCs are granted to `service_role`). Phase 5B adds one more
   migration (`20261120000000`, `clips.captions jsonb`) — without it, clips
   simply render without subtitles (the column is read defensively).
+  Phase 7 adds `20261124000000` (checkpoint + candidate-event tables,
+  additive `twitch` source type) — without it, the intel pipeline has no
+  store to resume from (the job loop does not call it yet).
 - For subtitles: an FFmpeg build with **libass** (the CI apt build and the
   bundled ffmpeg-static both include it) and a fontconfig-resolvable font
   (DejaVu Sans by default; pinned via `fonts-dejavu-core` in CI).
@@ -211,7 +248,16 @@ startup (see `app/config/settings.py`):
 | `WORKER_WORKER_ENABLED` | `true` | Set `false` for API-only deployments |
 | `WORKER_RENDER_CONCURRENCY` | `2` | Clips rendered in parallel per job (1-8); each clip is one FFmpeg subprocess |
 | `WORKER_RENDER_TIMEOUT_SECONDS` | `900` | Wall-clock budget for one clip render (0 < x ≤ 7200); the subprocess is killed and awaited after it |
-| `WORKER_MAX_CLIP_SIZE_BYTES` | `209715200` (200 MiB) | A rendered clip larger than this is rejected (not uploaded) |
+ | `WORKER_MAX_CLIP_SIZE_BYTES` | `209715200` (200 MiB) | A rendered clip larger than this is rejected (not uploaded) |
+ | `WORKER_RENDER_FPS_LOW` / `WORKER_RENDER_FPS_HIGH` | `30` / `60` | Source-preserved output rate: the measured source rate is kept (fractional included) and capped at HIGH; LOW is the fallback only when the rate is unmeasurable (no frame duplication) |
+ | `WORKER_RENDER_FPS_HIGH_SOURCE_THRESHOLD` | `55` | Retained for settings compatibility; the source-preserved selection no longer uses it |
+ | `WORKER_INTEL_CHUNK_SECONDS` | `600` | Analysis chunk length (operational bound, NOT a duration cap) (60-3600) |
+ | `WORKER_INTEL_OVERLAP_SECONDS` | `30` | Chunk overlap keeping boundary events whole (0 ≤ x < chunk) |
+ | `WORKER_INTEL_CHUNKS_PER_CLAIM` | `20` | Chunks one invocation processes before returning `incomplete` (resume next claim) (1-1000) |
+ | `WORKER_INTEL_SCENE_THRESHOLD` | `0.3` | ffmpeg scene-score cut threshold (0.05 < x ≤ 0.95) |
+ | `WORKER_INTEL_CHUNK_TIMEOUT_SECONDS` | `300` | Per-chunk decode / visual-pass budget; the subprocess is killed after it |
+ | `WORKER_INTEL_REQUESTED_CLIPS` | `5` | Default number of ranked candidate clips (1-25) |
+ | `WORKER_INTEL_MAX_RESUMES` | `100000` | Resume requeues allowed before a permanent `intel_resume_exhausted` failure (resumes never consume the job's `attempt_count` retry budget) |
 | `WORKER_CAPTION_FONT_FAMILY` | `DejaVu Sans` | libass font family (fontconfig-resolved; no markup characters) |
 | `WORKER_CAPTION_FONT_SIZE` | `88` | Glyph size in PlayRes pixels (24-200) |
 | `WORKER_CAPTION_BASE_COLOR` | `FFFFFF` | Spoken-word color (RRGGBB) — ASS PrimaryColour |
@@ -264,8 +310,13 @@ worker/app/
 ├── rendering/     # FFmpeg renderer (Phase 5A/5B): profiles, subprocess lifecycle,
 │                  #   rotation-aware cut/reframe, ASS caption burn-in, output contract
 ├── storage/       # Private Supabase Storage download + clip upload + local path utilities
-├── validation/    # FFprobe media validation (container/streams/limits)
+├── validation/    # FFprobe media validation (container/streams; no source-duration cap since TASK 007)
+├── intel/         # Stream intelligence (Phase 7): chunk plan, audio/visual features,
+│                  #   detectors, fusion, selection, checkpoints store, pipeline, testing double
+├── providers/     # Source adapters (Phase 7): protocol, upload (full), youtube/twitch (validation-only)
 ├── worker.py      # Ingestion loop (claim, concurrency, backoff, shutdown)
 ├── cleanup.py     # Manual artifact purge CLI (Phase 6; retention policy, idempotent)
 └── config/        # Settings + structured logging
+
+worker/benchmarks/  # Deterministic benchmark fixture + runner (python -m benchmarks.run)
 ```

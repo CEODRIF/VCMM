@@ -37,6 +37,7 @@ def build_worker(settings: Settings):
         return None
     from supabase import create_async_client
 
+    from .intel.checkpoints import IntelStore
     from .processors.analysis import AnalysisProcessor
     from .processors.rendering import RenderProcessor
     from .queue.supabase_queue import SupabaseQueue
@@ -52,7 +53,11 @@ def build_worker(settings: Settings):
     storage = SupabaseStorage(client, settings.max_upload_size_bytes, max_clip_bytes=settings.max_clip_size_bytes)
     transcriber = build_transcription_provider(settings)
     clip_store = SupabaseClipStore(client)
-    analysis = AnalysisProcessor(settings, queue, storage, transcriber, clip_store)
+    # Phase 7b: the stream-intelligence checkpoint store (same service-role
+    # client). Its presence turns on the resumable intel pipeline as the
+    # primary analysis path (the transcript detector remains the fallback).
+    intel_store = IntelStore(client)
+    analysis = AnalysisProcessor(settings, queue, storage, transcriber, clip_store, intel_store=intel_store)
     profile = RenderProfile()
     renderer = FFmpegRenderer(
         settings.ffmpeg_path,
@@ -60,6 +65,9 @@ def build_worker(settings: Settings):
         profile=profile,
         timeout_seconds=settings.render_timeout_seconds,
         probe_timeout_seconds=settings.ffprobe_timeout_seconds,
+        fps_low=settings.render_fps_low,
+        fps_high=settings.render_fps_high,
+        fps_high_source_threshold=settings.render_fps_high_source_threshold,
     )
     rendering = RenderProcessor(settings, queue, storage, clip_store, renderer)
     return IngestionWorker(settings, queue, storage, analysis=analysis, rendering=rendering)

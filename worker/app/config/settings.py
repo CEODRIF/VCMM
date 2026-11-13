@@ -51,8 +51,10 @@ class Settings(BaseSettings):
     supabase_url: str | None = None
     supabase_service_role_key: str | None = None
     #: Media validation limits (mirrors the frontend MAX_* variables).
+    #: NOTE (TASK 007): there is intentionally NO source-duration cap —
+    #: recordings are analyzed incrementally (see the intel settings below).
+    #: The size limit stays: it bounds storage and temp disk, not duration.
     max_upload_size_bytes: int = Field(default=2 * 1024 * 1024 * 1024, gt=0)
-    max_source_duration_seconds: float = Field(default=8 * 3600, gt=0)
     #: Binary locations (overridable for CI/static builds).
     ffmpeg_path: str = "ffmpeg"
     ffprobe_path: str = "ffprobe"
@@ -85,6 +87,17 @@ class Settings(BaseSettings):
     #: A rendered clip larger than this is a contract violation and is
     #: rejected (not uploaded).
     max_clip_size_bytes: int = Field(default=200 * 1024 * 1024, gt=0)
+    #: Source-preserved frame rate (TASK 007, Priority 4): the clip is
+    #: rendered at the MEASURED source rate (fractional NTSC rates included,
+    #: e.g. 23.976 / 29.97 / 59.94), capped at ``render_fps_high`` — the
+    #: output never exceeds the measured rate, so frames are never duplicated
+    #: to fake a higher rate. ``render_fps_low`` is the fallback used only
+    #: when the source rate cannot be measured.
+    render_fps_low: int = Field(default=30, ge=12, le=60)
+    render_fps_high: int = Field(default=60, ge=30, le=120)
+    #: Retained for settings compatibility with the earlier two-tier design;
+    #: the source-preserved selection no longer uses it.
+    render_fps_high_source_threshold: float = Field(default=55.0, gt=0, le=120)
 
     # --- Phase 5B: caption style (burned-in animated subtitles) ----------------
     #: Font family passed to libass (resolved by fontconfig; deterministic
@@ -106,6 +119,32 @@ class Settings(BaseSettings):
     #: Uppercase Latin words (Arabic/CJK are never transformed).
     caption_uppercase: bool = True
 
+    # --- Phase 7: stream intelligence (bounded, resumable long-form analysis) --
+    # These are OPERATIONAL limits (per-chunk decode size, per-claim budget),
+    # NOT a maximum recording duration: the chunk planner has no upper bound,
+    # a 100-hour VOD simply yields more chunks processed across more claims.
+    #: Audio/visual chunk length + overlap (the overlap keeps boundary events
+    #: whole: both neighbours see them, the midpoint owner persists them).
+    intel_chunk_seconds: int = Field(default=600, ge=60, le=3600)
+    intel_overlap_seconds: int = Field(default=30, ge=0, le=300)
+    #: How many chunks ONE worker claim processes before returning
+    #: ``incomplete`` (resume on the next claim). Bounds wall-clock per claim.
+    intel_chunks_per_claim: int = Field(default=20, ge=1, le=1000)
+    #: ffmpeg scene-score threshold for a "measured cut".
+    intel_scene_threshold: float = Field(default=0.3, gt=0.05, le=0.95)
+    #: Per-chunk decode / visual-pass wall-clock budgets (subprocess killed).
+    intel_chunk_timeout_seconds: float = Field(default=300.0, gt=0, le=3600)
+    #: How many candidate clips a completed run ranks out (the job can still
+    #: request more; this is the analysis-side default).
+    intel_requested_clips: int = Field(default=5, ge=1, le=25)
+    #: SAFETY CAP on incomplete-analysis resumes (Phase 7b). A resume is
+    #: progress, not a failure, so it is NOT bounded by the failure
+    #: ``max_attempts`` budget — it has its own cap. The value is generous
+    #: enough that NO legitimate recording (even at ``intel_chunks_per_claim``
+    #: = 1) can hit it, but a genuinely stuck pipeline eventually fails the
+    #: job instead of resuming forever. Env: WORKER_INTEL_MAX_RESUMES.
+    intel_max_resumes: int = Field(default=100000, ge=1)
+
     @field_validator("transcription_language")
     @classmethod
     def _empty_language_to_none(cls, value: str | None) -> str | None:
@@ -119,6 +158,12 @@ class Settings(BaseSettings):
             raise ValueError(
                 "WORKER_TRANSCRIPTION_OVERLAP_SECONDS must be smaller than WORKER_TRANSCRIPTION_CHUNK_SECONDS"
             )
+        if self.intel_overlap_seconds >= self.intel_chunk_seconds:
+            raise ValueError(
+                "WORKER_INTEL_OVERLAP_SECONDS must be smaller than WORKER_INTEL_CHUNK_SECONDS"
+            )
+        if self.render_fps_low > self.render_fps_high:
+            raise ValueError("WORKER_RENDER_FPS_LOW must be <= WORKER_RENDER_FPS_HIGH")
         return self
 
     @field_validator("caption_base_color", "caption_highlight_color", "caption_outline_color")

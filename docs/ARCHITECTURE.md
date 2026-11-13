@@ -183,7 +183,7 @@ Security properties:
   always filtered by the verified `session_id`; job ids are UUIDs and foreign
   ids are indistinguishable from missing ones.
 - **Rate limiting** on `POST /api/access` (sliding window, per IP; in-memory —
-  per-instance on Vercel, Redis-backed planned in Phase 7).
+  per-instance on Vercel, Redis-backed planned in Phase 8).
 - Session lifecycle: created on successful auth; verified on every protected
   request; expired rows are deleted on first use; `DELETE /api/access` signs
   out.
@@ -290,9 +290,11 @@ Modules and their phases:
 | `app/ai` | Sentence extraction, complete-idea window detection, explainable 5-criterion scoring, per-clip word attachment (5B) | 4 / 5B (done) |
 | `app/rendering` | FFmpeg subprocess lifecycle (timeout/cancel/cleanup), rotation-aware reframe + cut to exact 1080x1920, **deterministic ASS caption engine + libass `ass=` burn-in in the same command (5B)**, FFprobe output-contract validation, render profiles | 5A / 5B (done) |
 | `app/storage` | Private Supabase Storage download + clip upload (path-shape validated, size-capped, upsert) + clip persistence (job-scoped, incl. captions payload) + local path utilities | 3 / 4 / 5 (done) |
-| `app/validation` | FFprobe media validation (container, streams, codecs, duration, size) | 3 (done) |
+| `app/validation` | FFprobe media validation (container, streams, codecs, measured fps; size-bounded — NO source-duration cap since Phase 7) | 3 / 7 (done) |
 | `app/config` | Pydantic settings (env-validated) + JSON structured logging | 1 / 4 / 5 |
 | `app/cleanup.py` | Manual artifact purge CLI (Phase 6): retention-policy candidates → job-scoped storage deletes → guarded `purged_at` marker; idempotent, NOT scheduled | 6 (done) |
+| `app/intel` | Stream intelligence (Phase 7): deterministic overlap chunk plan + midpoint ownership, bounded per-chunk decodes, numpy audio features (RMS/ZCR 20 Hz, silence gaps) + FFmpeg-only visual features (scene cuts, motion bursts), detectors, multimodal fusion (loud-alone can never qualify), context-aware selection (silence-snapped, merged, deduped, 60-180 s, ranked), job-scoped checkpoint store, resumable pipeline orchestrator; `testing.py` = in-memory reference store for tests/benchmarks | 7 (done — in-loop wiring is a documented next step, `docs/stream-intelligence.md` §11) |
+| `app/providers` | Source adapters outside the pipeline (Phase 7): protocol + registry (no guessing); upload fully implemented (probe + injected bounded download); YouTube (keyless oEmbed) / Twitch (keyless Helix) validation-ONLY with explicit materialization refusal (`MaterializationUnavailable`). No yt-dlp, no DRM bypass | 7 (done) |
 
 Ingestion loop (Phase 3): poll → `claim_next_job` (atomic) → bounded-
 concurrency processing (semaphore) → download to temp → FFprobe validate →
@@ -408,7 +410,44 @@ strictly job-scoped (source directory listing + clip rows whose
 malformed paths are skipped and logged), storage is cleared BEFORE the
 guarded marker update (at-least-once: a crash between the two is resolved
 by a safe re-run), and no scheduler of any kind is wired — deletion is an
-explicit operator action until the policy is proven in a live environment.
+ explicit operator action until the policy is proven in a live environment.
+
+Stream intelligence (Phase 7, TASK 007): a NEW, duration-independent
+analysis path that does not alter any Phase 4-6 behavior. The source is
+chunked deterministically (`plan_chunks`: overlap planner, no upper bound —
+a 100 h VOD yields ~632 chunks at the defaults); each chunk is decoded with
+a bounded `-ss/-t` (audio mono 16 kHz WAV ≈ 19 MB at 600 s; two 2 fps
+visual passes to the null muxer — no frames accumulate, nothing extra on
+disk). Chunk i OWNS the absolute interval
+`[start_i + overlap/2, start_{i+1} + overlap/2)`, so an event on a chunk
+boundary is detected by BOTH neighbours but persisted by EXACTLY ONE —
+never lost, never duplicated. Per chunk, events are upserted to
+`candidate_events` (stable `event_key = sha256(job | 0.1 s time bucket |
+family | kind)` → retries exact-dedupe) BEFORE `mark_chunk_done`
+(`processing_checkpoints`, PK (job, chunk_index)); a crash in between only
+causes a safe re-detect + dedup on resume. The persisted per-chunk state is
+a compact 1 Hz summary (RMS/ZCR downsample, silence gaps, owned events) —
+fusion input is O(chunks), never O(file). Fusion combines independent
+families (audio/visual weights, ≥2 families → diversity bonus; a single
+family ×0.5; a group whose only audio kinds are transients ×0.2 and can
+NEVER reach the 25-point bar — a loud sound alone cannot qualify);
+selection adds pre/post context (4 s/8 s), snaps boundaries outward to
+measured silence (speech-safe), merges nearby windows, removes ≥0.5-IoU
+near-duplicates (keeps the stronger), enforces the 60-180 s product bounds,
+assigns 8 HEURISTIC categories (always labeled as such, plus `unclassified`
+with a reason) and ranks by (score, confidence, start). All of this is
+tested, including the interruption→resume definition-of-done test (zero
+reprocessing, final state identical to a clean run). Sources come through
+the `app/providers` registry: upload (fully implemented), YouTube/Twitch
+(validation-only — they refuse materialization explicitly rather than claim
+support). The renderer additionally renders at the MEASURED source fps
+(`select_output_fps`: the source rate is preserved — fractional NTSC
+included — capped at `WORKER_RENDER_FPS_HIGH`; no frame duplication, no
+silent clamping in 23.976…60). In-loop integration is DELIVERED (Phase
+7b): `AnalysisProcessor` runs the pipeline as the primary analysis path,
+incomplete runs requeue via `requeue_incomplete_analysis` + the dedicated
+`analysis_resumes` counter (no `attempt_count` burn), and crash recovery
+replays only missing chunks — see `docs/stream-intelligence.md` §11–12.
 
 ## Job state machine
 
@@ -445,7 +484,7 @@ ACTIVE `rendering` row. States are defined in `src/config/app.ts` (frontend),
   (`processing_sessions.expires_at`). Implemented and tested in Phase 2.
 - **No user accounts**; rate limiting on `/api/access` (5 / 15 min / IP)
   makes brute force impractical. Implemented in Phase 2 (per-instance;
-  Redis-backed global limit in Phase 7).
+  Redis-backed global limit in Phase 8).
 - **Service-role key isolation**: `SUPABASE_SERVICE_ROLE_KEY` is read only in
   `server-only` modules (`src/lib/env.ts`, `src/lib/supabase/server.ts`) and
   is never prefixed `NEXT_PUBLIC_`; the worker uses its own
@@ -641,3 +680,5 @@ Phase 6 (results API & product completion):
 | Location | Marker | Lands in |
 | --- | --- | --- |
 | `src/lib/jobs/service.ts` | `INTEGRATION POINT (authorized provider only)` | YouTube source materialization by an explicitly approved provider |
+| `worker/app/providers/{youtube,twitch}.py` | `MaterializationUnavailable` (explicit refusal) | Twitch/YouTube VOD materialization by an authorized provider — until then those adapters are validation-only and support is NOT claimed |
+| `worker/app/intel/pipeline.py` → `app/processors/analysis.py` | Seam documented in `docs/stream-intelligence.md` §11 | Next task: queue-side "incomplete → continue later" transition + the in-loop intel pass (then `candidate_events` + top-N feed the existing clip store; Phase 4 detector stays the fallback) |

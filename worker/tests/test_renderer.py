@@ -9,6 +9,7 @@ temp files cleaned. No process leaks (verified with pgrep).
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -21,6 +22,7 @@ from app.rendering.ffmpeg import FFmpegError
 from app.rendering.profiles import RenderProfile
 from app.rendering.renderer import FFmpegRenderer
 from app.rendering.validation import verify_render_output
+from app.validation.media import probe_media
 from conftest import _run_ffmpeg, patch_mp4_rotation
 
 
@@ -212,3 +214,118 @@ def test_window_duration_is_respected(ffmpeg_bin, ffprobe_bin, render_media, tmp
     info = run(verify_render_output(
         ffprobe_bin, out, RenderProfile(), expected_duration=1.5, timeout_seconds=30.0))
     assert abs(info.duration_seconds - 1.5) <= 0.225  # 15%
+
+
+# ---- source-aware frame rate (TASK 007) -----------------------------------------
+
+def _make_fps_source(ffmpeg_bin: str, tmp_path: Path, rate: float) -> Path:
+    """A 1920x1080 landscape clip at a fixed frame rate (H.264 + AAC).
+
+    Fractional NTSC rates are exact: ``testsrc=rate=59.94`` probes back as
+    2997/50, ``rate=23.976`` as 2997/125.
+    """
+    src = tmp_path / f"src_{rate:g}fps.mp4"
+    _run_ffmpeg(
+        ffmpeg_bin,
+        ["-f", "lavfi", "-i", f"testsrc=duration=2:size=1920x1080:rate={rate:g}",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+         "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+         "-c:a", "aac", "-shortest", str(src)],
+    )
+    return src
+
+
+def _probe_video_frames(ffprobe_bin: str, path: Path) -> int:
+    """Decodes the video stream and counts ACTUAL frames (nb_read_frames)."""
+    result = subprocess.run(
+        [ffprobe_bin, "-v", "error", "-select_streams", "v:0", "-count_frames",
+         "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True, check=True,
+    )
+    return int(result.stdout.strip())
+
+
+def _stream_durations(ffprobe_bin: str, path: Path) -> tuple[float | None, float | None]:
+    """(video, audio) durations in seconds from ffprobe stream metadata."""
+    result = subprocess.run(
+        [ffprobe_bin, "-v", "error", "-print_format", "json", "-show_streams", str(path)],
+        capture_output=True, text=True, check=True,
+    )
+    streams = json.loads(result.stdout).get("streams") or []
+    video = next((s for s in streams if s.get("codec_type") == "video"), None)
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    return (
+        float(video["duration"]) if video and video.get("duration") else None,
+        float(audio["duration"]) if audio and audio.get("duration") else None,
+    )
+
+
+def test_60fps_source_renders_at_60fps(ffmpeg_bin, ffprobe_bin, tmp_path):
+    # High-fps gameplay must NOT be dropped to 30: a 60 fps source yields a
+    # 60 fps output (measured by ffprobe — a fact, not a claim).
+    src = _make_fps_source(ffmpeg_bin, tmp_path, 60)
+    assert run(probe_media(ffprobe_bin, src, 30.0)).avg_fps is not None
+    renderer = make_renderer(ffmpeg_bin, ffprobe_bin)
+    out = tmp_path / "out60.mp4"
+    run(renderer.render(str(src), 0.0, 2.0, RenderSpec(), str(out)))
+    info = run(verify_render_output(
+        ffprobe_bin, out, RenderProfile(), expected_duration=2.0, timeout_seconds=30.0))
+    assert (info.width, info.height) == (1080, 1920)
+    measured = run(probe_media(ffprobe_bin, out, 30.0)).avg_fps
+    assert measured is not None and measured >= 55.0, f"60fps source rendered at {measured}fps"
+
+
+def test_30fps_source_renders_at_30fps(ffmpeg_bin, ffprobe_bin, tmp_path):
+    # A 30 fps source keeps the profile default (30) — frames are never
+    # duplicated to fake a higher rate.
+    src = _make_fps_source(ffmpeg_bin, tmp_path, 30)
+    renderer = make_renderer(ffmpeg_bin, ffprobe_bin)
+    out = tmp_path / "out30.mp4"
+    run(renderer.render(str(src), 0.0, 2.0, RenderSpec(), str(out)))
+    run(verify_render_output(
+        ffprobe_bin, out, RenderProfile(), expected_duration=2.0, timeout_seconds=30.0))
+    measured = run(probe_media(ffprobe_bin, out, 30.0)).avg_fps
+    assert measured is not None and 28.0 <= measured <= 32.0, f"30fps source rendered at {measured}fps"
+
+
+@pytest.mark.parametrize("rate", [24.0, 30.0, 55.0, 59.94, 60.0, 23.976])
+def test_source_fps_is_preserved(ffmpeg_bin, ffprobe_bin, tmp_path, rate):
+    """Priority 4 (real FFmpeg + ffprobe): a ``rate`` fps source renders at
+    ``rate`` fps — measured metadata, actual frame count, and A/V sync.
+
+    Tolerances are chosen so the WRONG legacy behavior is caught: 24 rendered
+    at 30 (frame dupes) and 59.94 rendered at 60 both fail these asserts.
+    """
+    src = _make_fps_source(ffmpeg_bin, tmp_path, rate)
+    src_fps = run(probe_media(ffprobe_bin, src, 30.0)).avg_fps
+    assert src_fps is not None and abs(src_fps - rate) < 0.01, \
+        f"fixture probes as {src_fps}fps, expected {rate:g}fps"
+
+    renderer = make_renderer(ffmpeg_bin, ffprobe_bin)
+    out = tmp_path / f"out_{rate:g}.mp4"
+    run(renderer.render(str(src), 0.0, 2.0, RenderSpec(), str(out)))
+    info = run(verify_render_output(
+        ffprobe_bin, out, RenderProfile(), expected_duration=2.0, timeout_seconds=30.0))
+    # The vertical output contract still holds at every source rate.
+    assert (info.width, info.height) == (1080, 1920)
+
+    # 1) Correct output frame-rate METADATA: within ±0.011 of the source
+    #    rate (the 59.94 ↔ 60 gap is 0.06, so a faked 60 is caught).
+    measured = run(probe_media(ffprobe_bin, out, 30.0)).avg_fps
+    assert measured is not None and abs(measured - rate) <= 0.011, \
+        f"{rate:g}fps source rendered at {measured}fps — source rate must be preserved"
+
+    # 2) Actual frame count (decoded): frames ≈ rate × duration. Bulk
+    #    duplication/dropping (e.g. 60 frames where 48 are expected) fails.
+    frames = _probe_video_frames(ffprobe_bin, out)
+    expected_frames = rate * info.duration_seconds
+    assert abs(frames - expected_frames) <= max(2.0, 0.05 * rate), \
+        (f"{frames} video frames decoded, expected ≈{expected_frames:.1f} "
+         f"at {rate:g}fps over {info.duration_seconds:.3f}s")
+
+    # 3) A/V synchronization: both streams present, durations agree,
+    #    audio spans the requested window.
+    vdur, adur = _stream_durations(ffprobe_bin, out)
+    assert vdur is not None and adur is not None, "output is missing a video or audio stream"
+    assert abs(vdur - adur) <= 0.05, f"A/V desync: video {vdur:.4f}s vs audio {adur:.4f}s"
+    assert abs(adur - 2.0) <= 0.1, f"audio duration {adur:.4f}s, expected ≈2.0s"
