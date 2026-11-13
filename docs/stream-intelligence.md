@@ -44,6 +44,13 @@ chosen architecture (sections 2-8) BEFORE any major code change.
 4. **No provider abstraction** — `source_type in ('youtube','upload')`;
    YouTube materialization is a marked integration point; no URL
    validation/availability layer on the worker.
+   *(Phase 8 / TASK 011 update: the worker now has the provider layer —
+   official-API metadata validation with typed normalized sources,
+   SSRF-guarded HTTP, an honest materialization refusal for platform URLs,
+   and a provider-independent materialization service; ingestion dispatches
+   `youtube`/`twitch` jobs through it while uploads keep the identical path.
+   The intel pipeline itself is unchanged: it still consumes normalized
+   source files.)*
 5. **Fixed 30 FPS output** — `RenderProfile.fps=30` (`-r 30`) downsamples
    60 FPS gaming sources (quality loss; the task asks to preserve the
    source rate where practical).
