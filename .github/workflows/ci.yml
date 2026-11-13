@@ -77,3 +77,21 @@ jobs:
 
       - name: Python tests
         run: python -m pytest tests -v
+
+      - name: Facecam real-model tests (optional extra, best-effort)
+        # TASK 008: the facecam real-model smoke tests run ONLY when the
+        # optional mediapipe extra and its two small Apache-2.0 model files
+        # are available (public Google-hosted assets, downloaded into the
+        # workspace — never committed). Best-effort by design: the main
+        # worker suite above already ran WITHOUT the extra and skips these
+        # tests cleanly, so a failure here (e.g. model host outage) does
+        # not fail the PR. No secrets, no paid services, CPU-only.
+        continue-on-error: true
+        run: |
+          pip install -r requirements-facecam.txt
+          mkdir -p .facecam-models
+          curl -fsSL -o .facecam-models/blaze_face_short_range.tflite \
+            "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/latest/blaze_face_short_range.tflite"
+          curl -fsSL -o .facecam-models/face_landmarker.task \
+            "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task"
+          FACECAM_TEST_MODELS_DIR=.facecam-models python -m pytest tests/test_facecam.py -v -k real_model
