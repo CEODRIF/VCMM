@@ -8,10 +8,12 @@ ClipForge AI is a web application that transforms long-form videos into short-fo
 - Vertical 9:16 output at 1080x1920 (1080p) with modern animated subtitles.
 - Individual downloads and ZIP batch downloads.
 
-> **Status: Phase 1 — project foundation.** The UI, configuration, worker health
-> endpoint, database design, tests and CI are in place. Video processing,
-> authentication and job submission are **not connected yet** and are clearly
-> marked as integration points in the code and in `docs/ROADMAP.md`.
+> **Status: Phase 2 — secure access control & job management.** Server-side
+> access-code authentication (rate-limited, constant-time, hash-only), temporary
+> anonymous sessions in HttpOnly cookies, session-scoped job creation/status
+> APIs, and the Supabase schema with RLS — tested against a real PostgreSQL
+> engine in CI. Video download/processing/rendering still arrives in
+> Phases 3-5 and is clearly marked in the code and in `docs/ROADMAP.md`.
 
 ## Technology stack
 
@@ -127,29 +129,49 @@ Server-side validation is implemented in `src/lib/env.ts` (zod) and
 
 ## Supabase setup
 
-1. Create a Supabase project (free tier is fine for development).
+1. Create a **development** Supabase project (free tier is fine).
 2. Store the project URL and keys in your environment (see table above).
-3. The initial schema lives in `supabase/migrations/20261113000000_initial_schema.sql`.
-   It is **version-controlled but not applied to any database yet**. When Phase 2
-   starts, apply it to a development project (e.g. via the Supabase CLI or dashboard)
-   and verify the RLS deny-by-default behavior before any client access.
+3. Apply both migrations to the development project (Supabase dashboard SQL
+   editor or Supabase CLI), in order:
+   - `supabase/migrations/20261113000000_initial_schema.sql` (Phase 1)
+   - `supabase/migrations/20261114000000_phase2_job_settings_and_session_lookup.sql` (Phase 2)
+
+Both migrations are executed and asserted against a real PostgreSQL 16 engine
+(WASM) in the test suite (`tests/database/rls.test.ts`), including the
+deny-by-default RLS behavior.
 
 Tables: `processing_sessions`, `jobs`, `clips` — all with RLS enabled and no
 anonymous policies (access is mediated exclusively by the server-side API).
+No migrations are applied to any production database by this project.
+
+## Access code setup (Phase 2)
+
+1. Choose a shared access code (keep it secret).
+2. Store **only its SHA-256 hash** server-side in `ACCESS_CODE_HASH`
+   (generate: `node -e "console.log(require('crypto').createHash('sha256').update('YOUR_CODE').digest('hex'))"`).
+3. Without `ACCESS_CODE_HASH` set, `POST /api/access` returns 503.
+
+Authentication flow (details in `docs/ARCHITECTURE.md`):
+code → server compares SHA-256 hash in constant time (rate-limited: 5 / 15 min
+per IP) → 256-bit random session token in an HttpOnly SameSite=Lax cookie (24h)
+→ only the token's hash is stored in `processing_sessions`.
 
 ## Testing
 
 ```bash
-# Frontend (vitest)
+# Frontend (vitest) — includes real-Postgres schema/RLS tests (pglite, WASM)
 npm test
 
 # Worker (pytest)
 cd worker && python -m pytest
 ```
 
-Initial coverage: application configuration, clip duration validation, clip
-count validation, environment variable validation (frontend); worker health
-endpoint, worker env configuration, module imports/contracts (worker).
+Coverage: application configuration, clip duration/count validation,
+environment variable validation, **access-code authentication API, session
+security (tokens, cookies, expiry, constant-time), rate limiting, job API
+authorization (session scoping, anti-enumeration), database migrations and RLS
+against a real PostgreSQL engine** (frontend); worker health endpoint, worker
+env configuration, module imports/contracts (worker).
 
 ## CI
 
@@ -164,23 +186,30 @@ pull requests:
 | Area | Status |
 | --- | --- |
 | Frontend foundation (Next.js, TS strict, Tailwind, shadcn-compatible UI kit) | Done |
-| Landing / Access / Creation / Processing / Results pages | Done (UI) |
-| Creation form validation (YouTube URL, clip count 1-10, duration 60-180s) | Done |
+| Landing / Access / Creation / Processing / Results pages | Done |
+| Creation form validation (YouTube URL, clip count 1-10, duration 60-180s) | Done (client + server) |
 | Python worker + `GET /health` + settings + JSON logging + Docker | Done |
-| Supabase schema (3 tables, RLS deny-by-default) | Designed & version-controlled; **not applied** |
-| Access-code authentication | UI only; **server implementation in Phase 2** |
-| Job creation / queue / video processing | **Not implemented** (Phases 2-5) |
+| Supabase schema (3 tables, RLS deny-by-default) + Phase 2 columns | Version-controlled; tested against real Postgres (WASM); apply to a dev project before use |
+| Access-code authentication (rate-limited, constant-time, hash-only) | **Done — `POST /api/access`** |
+| Anonymous sessions (HttpOnly cookie, 24h, hash stored, sign-out) | **Done** |
+| Job creation API (`POST /api/v1/jobs`, session-scoped) | **Done** |
+| Job status API (`GET /api/v1/jobs`, `GET /api/v1/jobs/[id]`) | **Done** (live polling UI) |
+| Queue consumption / video processing | **Not implemented** (Phase 3+) — jobs stay `queued` |
 | Clip rendering / subtitles / downloads | **Not implemented** (Phases 5-6) |
 
 ## Known limitations
 
-- No video is downloaded, transcribed, analyzed or rendered anywhere yet.
-- The Access page validates input format only; no authentication is performed
-  (intentional — client-side auth would be insecure).
-- The Processing and Results pages show typed placeholder data, clearly
-  labeled in the UI and in code comments.
-- The Supabase migration has been reviewed but not executed against a real
-  database.
+- No video is downloaded, transcribed, analyzed or rendered anywhere yet —
+  created jobs remain `queued` until the Phase 3 queue integration.
+- Upload-source jobs are created with a reserved storage path, but the file
+  transfer itself arrives in Phase 3.
+- Rate limiting is per-instance (in-memory). On multi-instance Vercel the
+  effective limit is per-instance; a Redis-backed limiter is planned (Phase 7).
+- The migrations are executed and asserted in tests against a real PostgreSQL
+  engine (WASM), but not yet applied to a live Supabase project — apply both
+  migrations to a development project before end-to-end use (see above).
+- The Results page still shows placeholder data (Phase 6); downloads are not
+  implemented.
 - YouTube ingestion will use an authorized source provider (Phase 3); no
   downloader is implemented and none should be added ad hoc.
 - No monitoring/alerting yet (Phase 7).

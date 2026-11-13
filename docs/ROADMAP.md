@@ -18,26 +18,35 @@ Seven phases, in order. Each phase ends with a shippable increment.
 - Tests (vitest + pytest) and GitHub Actions CI.
 - Documentation (README, ARCHITECTURE, ROADMAP).
 
-## Phase 2 — Access control & job API
+## Phase 2 — Access control & job API ✅ (this commit)
 
 - `POST /api/access`: verify shared access code against `ACCESS_CODE_HASH`
-  (constant-time SHA-256 compare), issue httpOnly session cookie, store session
-  in `processing_sessions`; rate limiting on the endpoint.
-- Apply the Phase 1 migration to a **development** Supabase project and verify
-  RLS behavior; add session-scoped policies where needed.
-- `POST /api/v1/jobs` + `GET /api/v1/jobs/[id]`: create jobs, poll status;
-  session middleware protecting job routes; centralized error handling.
-- Wire the Access page to the real endpoint (no client-side auth).
+  (constant-time SHA-256 compare), issue 256-bit session token in an HttpOnly
+  SameSite=Lax (Secure-in-prod) 24h cookie; only the token's hash stored in
+  `processing_sessions`; sliding-window rate limit (5 / 15 min / IP).
+- `DELETE /api/access`: sign-out (destroy session row, clear cookie).
+- `POST /api/v1/jobs`: session-gated, zod-validated, session-owned job rows
+  (adds `clip_duration_seconds` + `captions_enabled` via Phase 2 migration).
+- `GET /api/v1/jobs` + `GET /api/v1/jobs/[id]`: session-scoped list/status,
+  anti-enumeration (foreign ids ≡ 404, non-UUID ids rejected pre-DB).
+- UI wired: Access form → real auth; Creation form → real job creation;
+  Processing page → live polling panel; header → session-aware sign-out.
+- Centralized API error handling (no stack/DB/storage leakage).
+- Migrations 1+2 executed and asserted against a real PostgreSQL 16 engine
+  (pglite WASM) in CI: schema, constraints, and RLS deny-by-default
+  (anon blocked, service_role BYPASSRLS verified).
+- Test suites: auth API, session security, rate limiter, jobs API
+  authorization, database/RLS.
 
 ## Phase 3 — Ingestion
 
 - YouTube source via an **authorized source provider** (server-side fetch,
   never in the browser); upload path with size/type validation.
-- Queue backend for jobs (worker consumes jobs; state transitions written to
-  `jobs` with progress updates).
+- Queue backend for jobs (worker consumes `queued` jobs created in Phase 2;
+  state transitions written to `jobs` with progress updates).
 - Storage: per-job layout on local FS, object-storage abstraction behind
   `worker/app/storage`.
-- Replace upload-area and creation-form placeholders with real transfers.
+- Multipart upload transfer (fills the reserved `source_path` from Phase 2).
 
 ## Phase 4 — AI pipeline
 

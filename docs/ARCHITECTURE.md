@@ -50,20 +50,77 @@
 
 ### API layer (Next.js route handlers)
 
+Implemented in Phase 2:
+
 - `POST /api/access` — verifies the shared access code against
-  `ACCESS_CODE_HASH` (SHA-256, constant-time compare) and issues a short-lived
-  session token as an `httpOnly` cookie (Phase 2).
-- `POST /api/v1/jobs` — validates the payload, creates a `jobs` row and
-  enqueues the worker (Phase 2/3).
-- `GET /api/v1/jobs/[id]` — returns status/progress for the polling UI (Phase 2).
-- `GET /api/v1/jobs/[id]/clips` — returns the clip list once complete (Phase 6).
-- `GET /api/v1/clips/[id]` and ZIP export endpoints (Phase 6).
-- Centralized error handling: typed errors mapped to stable HTTP responses;
-  stack traces and internal details never leak to the client.
+  `ACCESS_CODE_HASH` (SHA-256, constant-time compare), rate-limited
+  (5 attempts / 15 min / IP), and issues a 256-bit session token as an
+  HttpOnly, SameSite=Lax cookie (Secure in production, 24h lifetime).
+- `DELETE /api/access` — destroys the session row and clears the cookie.
+- `POST /api/v1/jobs` — session required; re-validates the payload server-side
+  (zod); inserts a `jobs` row owned by the verified session. Worker enqueue
+  lands in Phase 3.
+- `GET /api/v1/jobs` — session required; lists only the session's jobs.
+- `GET /api/v1/jobs/[id]` — session required; returns the job only if it is
+  owned by the session; otherwise the same 404 as a missing id
+  (anti-enumeration).
+
+Coming: `GET /api/v1/jobs/[id]/clips`, `GET /api/v1/clips/[id]`, ZIP export
+(Phase 6).
+
+Centralized error handling (`src/lib/api/errors.ts`): typed `ApiError` mapped
+to stable `{ "error": string }` responses; zod errors → 400; everything else →
+generic 500 with server-side logging. Stack traces, database internals and
+storage paths never leak to the client.
 
 **The API layer must stay fast and stateless.** Anything that touches video
 bytes (downloading, audio extraction, transcription, rendering, zipping)
 belongs to the worker.
+
+### Authentication & session model (Phase 2)
+
+```
+Browser                          Next.js server (Vercel)                Supabase
+   │  POST /api/access {code}        │                                       │
+   │────────────────────────────────►│ 1. rate-limit check (per IP)          │
+   │                                 │ 2. sha256(code) vs ACCESS_CODE_HASH   │
+   │                                 │    (constant-time)                    │
+   │                                 │ 3. token = randomBytes(32)            │
+   │                                 │──────── sha256(token) ───────────────►│ processing_sessions
+   │◄────────── 200 + Set-Cookie ────│                                       │ (hash only, 24h)
+   │  clipforge_session=<token>      │                                       │
+   │  (HttpOnly — JS cannot read)    │                                       │
+   │                                 │                                       │
+   │  POST /api/v1/jobs (cookie)     │                                       │
+   │────────────────────────────────►│ 1. read cookie → sha256(token)        │
+   │                                 │──────── lookup + expiry ─────────────►│
+   │                                 │ 2. zod-validate payload               │
+   │                                 │ 3. insert job (session_id = verified) │
+   │◄────────── 201 { job.id } ──────│                                       │
+   │                                 │                                       │
+   │  GET /api/v1/jobs/[id] (cookie) │  session-scoped lookup only           │
+   │────────────────────────────────►│  foreign id ⇒ 404 (same as missing)   │
+```
+
+Security properties:
+
+- The **plaintext access code exists only in the client's memory and one
+  server request**; the server environment stores its SHA-256 hash
+  (`ACCESS_CODE_HASH`), the database stores session **token hashes**, never
+  codes or raw tokens.
+- Comparison is **constant-time** (SHA-256 both sides + `timingSafeEqual`).
+- Session tokens are **256-bit** from `crypto.randomBytes`.
+- Cookie: `HttpOnly` (no XSS exfiltration), `SameSite=Lax` (CSRF posture),
+  `Secure` in production, `Path=/`, 24h `Max-Age`.
+- **Authorization is server-side only**: every protected route re-verifies the
+  cookie → token hash → `processing_sessions` (expiry checked); job queries are
+  always filtered by the verified `session_id`; job ids are UUIDs and foreign
+  ids are indistinguishable from missing ones.
+- **Rate limiting** on `POST /api/access` (sliding window, per IP; in-memory —
+  per-instance on Vercel, Redis-backed planned in Phase 7).
+- Session lifecycle: created on successful auth; verified on every protected
+  request; expired rows are deleted on first use; `DELETE /api/access` signs
+  out.
 
 ### Database (Supabase / Postgres)
 
@@ -117,10 +174,11 @@ States are defined once in `src/config/app.ts` (frontend) and
 
 - **Single shared access code**, verified only server-side:
   `ACCESS_CODE_HASH` (SHA-256) in server env; constant-time comparison;
-  success issues an httpOnly session cookie with a short expiry
-  (`processing_sessions.expires_at`).
-- **No user accounts** in Phase 1-2 design; rate limiting on `/api/access`
-  to make brute force impractical (Phase 2).
+  success issues an httpOnly session cookie with a 24h expiry
+  (`processing_sessions.expires_at`). Implemented and tested in Phase 2.
+- **No user accounts**; rate limiting on `/api/access` (5 / 15 min / IP)
+  makes brute force impractical. Implemented in Phase 2 (per-instance;
+  Redis-backed global limit in Phase 7).
 - **Service-role key isolation**: `SUPABASE_SERVICE_ROLE_KEY` is read only in
   `server-only` modules (`src/lib/env.ts`, `src/lib/supabase/server.ts`) and
   is never prefixed `NEXT_PUBLIC_`.
@@ -134,13 +192,20 @@ States are defined once in `src/config/app.ts` (frontend) and
 - **Uploads**: size/type limits enforced server-side; file names sanitized to
   basenames; per-job storage isolation.
 
-## Integration points (marked in code)
+## Completed integrations (Phase 2)
+
+- `src/components/access/access-form.tsx` → `POST /api/access` (real auth).
+- `src/components/create/creation-form.tsx` → `POST /api/v1/jobs` (real job
+  creation; 401 routes to the access page).
+- `src/app/processing/page.tsx` → live polling of `GET /api/v1/jobs/[id]`
+  via `?job=<id>` (placeholder overview kept for development).
+- `src/components/site-header.tsx` → session-aware sign-out (`DELETE /api/access`).
+
+## Remaining integration points (marked in code)
 
 | Location | Marker | Lands in |
 | --- | --- | --- |
-| `src/components/access/access-form.tsx` | `INTEGRATION POINT (Phase 2)` | Access API |
-| `src/components/create/creation-form.tsx` | `INTEGRATION POINT (Phase 2/3)` | Job submission |
 | `src/components/create/upload-area.tsx` | `INTEGRATION POINT (Phase 3)` | Upload transfer |
-| `src/app/processing/page.tsx` | `DEVELOPMENT PLACEHOLDER DATA` | Job polling |
+| `src/lib/jobs/service.ts` | `INTEGRATION POINT (Phase 3)` | Worker enqueue / reserved upload path |
 | `src/app/results/page.tsx` | `DEVELOPMENT PLACEHOLDER DATA` | Results API |
 | `worker/app/*` module docstrings | Phase markers | Phases 3-5 |

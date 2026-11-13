@@ -61,12 +61,13 @@ const STATE_META: Record<ProcessingState, StateMeta> = {
 };
 
 /**
- * Processing state UI.
+ * Processing state UI (presentational).
  *
- * DEVELOPMENT PLACEHOLDER: the job shown here is typed static data, not a
- * real job. Live polling of /api/v1/jobs/[id] arrives in Phase 2.
+ * Used for two kinds of data:
+ *   - `live` = true: a real job fetched from /api/v1/jobs/[id] (Phase 2);
+ *   - `live` = false: typed placeholder data for development (Phase 1).
  */
-export function ProcessingPanel({ job }: { job: Job }) {
+export function ProcessingPanel({ job, live = false }: { job: Job; live?: boolean }) {
   const meta = STATE_META[job.status];
   const Icon = meta.icon;
   const stateIndex = appConfig.processingStates.indexOf(job.status);
@@ -114,13 +115,23 @@ export function ProcessingPanel({ job }: { job: Job }) {
             </p>
           )}
 
-          <div className="flex flex-col gap-1 rounded-md border bg-background/40 p-3 text-xs text-muted-foreground">
-            <p className="font-medium text-foreground">Development placeholder</p>
-            <p>
-              This job is typed sample data for UI development. Real job status will stream from the
-              worker via the API once Phase 2 lands.
-            </p>
-          </div>
+          {live ? (
+            <div className="flex flex-col gap-1 rounded-md border bg-background/40 p-3 text-xs text-muted-foreground">
+              <p className="font-medium text-foreground">Live job status</p>
+              <p>
+                Fetched from your session via GET /api/v1/jobs/{`[id]`}. The worker picks this job
+                up in Phase 3 (queue) and progresses it through the pipeline in Phases 4-5.
+              </p>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-1 rounded-md border bg-background/40 p-3 text-xs text-muted-foreground">
+              <p className="font-medium text-foreground">Development placeholder</p>
+              <p>
+                This job is typed sample data for UI development. Create a real job from the
+                Create page to see live status.
+              </p>
+            </div>
+          )}
         </CardContent>
       </Card>
 
