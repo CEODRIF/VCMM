@@ -155,6 +155,40 @@ run time — no binary fixtures are committed. Binaries are resolved from
 statics (`ffmpeg-static`/`ffprobe-static` after `npm install` in the repo
 root); tests skip cleanly when no binary is available.
 
+## Artifact cleanup (Phase 6) — manual only
+
+Rendered artifacts are retained for **30 days after a job reaches a terminal
+state** (`completed` or `failed`): the migration
+`20261123000000_phase6_results_retention.sql` sets
+`jobs.expires_at = now() + 30 days` via trigger when a job TRANSITIONS to a
+terminal state (only when NULL — an operator-set deadline always wins).
+
+The purge itself is a **manual command** — nothing destructive is scheduled
+automatically:
+
+```bash
+cd worker
+python -m app.cleanup            # purge up to 10 expired jobs
+python -m app.cleanup --limit 50 # bigger batch
+```
+
+Per job it does, in order (at-least-once, crash-safe):
+
+1. Re-verifies the row server-side: TERMINAL + EXPIRED + un-purged
+   (`purged_at IS NULL`) — in-progress jobs are never touched.
+2. Deletes `sources/{job_id}/original/*` (listed, then removed).
+3. Deletes the job's clip objects — only canonical
+   `clips/{job_id}/{clip_id}.mp4` paths whose stored `storage_path` matches
+   the shape AND the owning job (foreign/malformed paths are skipped and
+   logged).
+4. Sets `purged_at` with a guarded update (terminal + still expired + still
+   un-purged).
+
+If the process dies between (3) and (4), re-running is safe: already-deleted
+objects are no-ops and the marker is finally set. A job is never marked
+purged while its objects still exist. Jobs without an `expires_at` (created
+before the migration) are never purged — no guessed retention period.
+
 ## Configuration
 
 All settings use the `WORKER_` env prefix and are validated by Pydantic at
@@ -227,10 +261,11 @@ worker/app/
 ├── processors/    # Ingestion processor (Phase 3) + pipeline stage order (4-5)
 ├── transcription/ # Whisper adapter contract (Phase 4)
 ├── ai/            # Clip detection contract (Phase 4)
-├── rendering/     # FFmpeg renderer (Phase 5A): profiles, subprocess lifecycle,
-│                  #   rotation-aware cut/reframe, FFprobe output-contract validation
+├── rendering/     # FFmpeg renderer (Phase 5A/5B): profiles, subprocess lifecycle,
+│                  #   rotation-aware cut/reframe, ASS caption burn-in, output contract
 ├── storage/       # Private Supabase Storage download + clip upload + local path utilities
 ├── validation/    # FFprobe media validation (container/streams/limits)
 ├── worker.py      # Ingestion loop (claim, concurrency, backoff, shutdown)
+├── cleanup.py     # Manual artifact purge CLI (Phase 6; retention policy, idempotent)
 └── config/        # Settings + structured logging
 ```

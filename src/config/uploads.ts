@@ -52,6 +52,23 @@ export const uploadConfig = {
     windowMs: 60 * 1000,
     maxAttempts: 10,
   },
+
+  /**
+   * Phase 6 — signed clip URLs. SHORT-LIVED on purpose: a preview URL is
+   * good for 5 minutes (enough to watch the clip a few times), a download
+   * URL for 15 minutes (enough to start + resume a multi-hundred-MB file).
+   * They are read-only, path-bound, and expire — no public access exists.
+   */
+  clipPreviewUrlSeconds: (): number => envInt("CLIP_PREVIEW_URL_SECONDS", 300),
+  clipDownloadUrlSeconds: (): number => envInt("CLIP_DOWNLOAD_URL_SECONDS", 900),
+
+  /**
+   * Phase 6 — ZIP cap: the TOTAL size of the ready clip objects. The ZIP is
+   * streamed (memory stays at chunk size), but serverless execution time
+   * and bandwidth are bounded — a clear 413 with a "download individually"
+   * fallback beats a mid-stream abort. Default 1 GiB.
+   */
+  maxZipBytes: (): number => envInt("MAX_ZIP_SIZE_BYTES", 1 * 1024 * 1024 * 1024),
 } as const;
 
 export type AllowedExtension = keyof typeof uploadConfig.allowedExtensions;

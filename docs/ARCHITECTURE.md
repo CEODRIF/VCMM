@@ -101,8 +101,36 @@ Implemented in Phase 3 (ingestion):
   sizes — then performs the guarded atomic `uploading → queued` transition.
   Duplicate calls after finalization return 200 `alreadyCompleted`.
 
-Coming: `GET /api/v1/jobs/[id]/clips`, `GET /api/v1/clips/[id]`, ZIP export
-(Phase 6).
+Implemented in Phase 6 (results & downloads — every route re-verifies session
++ ownership on EVERY request; anti-enumeration extends to clip ids — a
+non-UUID clip id is 404 before any session/DB round trip, and a foreign or
+missing clip is indistinguishable from "not ready" or "object missing"):
+
+- `GET /api/v1/jobs/[id]/results` — the session's own job plus ONLY its
+  clips: `{id, title, duration, sortOrder, status, downloadable}`. A clip is
+  `downloadable` only when it is `ready` AND its stored `storage_path`
+  matches the canonical `clips/{job_id}/{clip_id}.mp4` shape for THIS job
+  (server cross-check — a client can never inject a path). For a completed
+  job the response also carries `zip: {available, totalBytes, limitBytes}`
+  (metadata-only storage listing) so the UI can offer, explain-disable or
+  hide "Download all" before the click. Storage paths, service-role material
+  and ownership internals never leave the server.
+- `GET /api/v1/jobs/[id]/clips/[clipId]/preview` — mints a SHORT-LIVED
+  server-side signed URL (default 300s, `CLIP_PREVIEW_URL_SECONDS`) for
+  inline playback, after verifying session + job ownership + clip/job
+  association + `ready` + canonical path + object existence (one metadata
+  listing per job). No URL is ever minted for a missing/foreign/invalid
+  clip — all failure shapes return the same generic 404.
+- `GET /api/v1/jobs/[id]/clips/[clipId]/download` — same check chain, but
+  the URL (default 900s, `CLIP_DOWNLOAD_URL_SECONDS`) is issued in
+  attachment flavour with a server-sanitized filename (single path segment;
+  path separators, forbidden characters and control characters removed;
+  length capped; empty titles fall back to `clip.mp4`).
+- `GET /api/v1/jobs/[id]/download-all` — "Download all" as a STREAMED ZIP
+  (see Storage below). JSON guards BEFORE the first archive byte: job must
+  be `completed` (else 409), at least one ready+canonical clip, ALL those
+  objects must exist (else 409), and the total size must fit the configured
+  cap (else 413 with a per-clip fallback message).
 
 Centralized error handling (`src/lib/api/errors.ts`): typed `ApiError` mapped
 to stable `{ "error": string }` responses; zod errors → 400; missing backend
@@ -201,14 +229,40 @@ Security properties:
 - Two **private** buckets (Phase 3 migration `20261115000001`, Supabase-
   specific):
   - `clipforge-sources` — original uploads, `sources/{job_id}/original/{uuid}.{ext}`.
-   - `clipforge-clips` — rendered output, `clips/{job_id}/{clip_id}.mp4`
-     (written by the Phase 5A renderer; upsert, so re-renders are
-     idempotent).
+    - `clipforge-clips` — rendered output, `clips/{job_id}/{clip_id}.mp4`
+      (written by the Phase 5A renderer; upsert, so re-renders are
+      idempotent).
 - **No client policies** on either bucket: with RLS deny-by-default, browsers
   can only ever act on (a) a signed upload URL issued server-side for exactly
-  one job-owned path, or (b) a short-lived signed download URL generated
-  server-side when necessary (clip delivery, Phase 6). There are no public
-  source-video URLs anywhere in this system.
+  one job-owned path, or (b) a SHORT-LIVED signed download URL minted
+  server-side (Phase 6: 300s preview / 900s attachment, both only after
+  session + ownership + clip/job + object verification). There are no public
+  source-video URLs — and no public clip URLs — anywhere in this system.
+- **Clip delivery is streamed, never buffered whole** (Phase 6). Individual
+  clips are never proxied: the browser holds a direct signed URL to Storage.
+  "Download all" is a STORE-method ZIP written by an async generator
+  (`src/lib/zip/store-zip.ts` — zero new dependencies): each entry's local
+  header carries no size/CRC (data-descriptor flag), the clip bytes are
+  fetched with the service key and piped chunk by chunk (concurrency exactly
+  1, sort order — bounded and deterministic), and the CRC32 + sizes are
+  emitted in the 0x08074b50 descriptor after the data; the central directory
+  and EOCD follow at the end. Server memory stays at a single fetch chunk
+  regardless of archive size; no temp files, no compression pass (MP4 is
+  already compressed). Entry names are sanitized server-side (index-prefixed,
+  single path segment — traversal impossible). Client cancellation (or a
+  mid-stream Storage failure) aborts the in-flight fetch and tears down the
+  response — a partially received archive is discarded by the client, and
+  the per-clip signed URLs remain the reliable fallback. Documented hosting
+  limit: serverless execution time/bandwidth are bounded, which is why the
+  total-size cap (`MAX_ZIP_SIZE_BYTES`, default 1 GiB) makes oversized sets
+  fail fast with a clear 413 instead of aborting mid-download.
+- **Retention & cleanup** (Phase 6): terminal jobs get
+  `expires_at = now() + 30 days` from the migration 20261123000000 trigger
+  (only when NULL — operator deadlines win). The worker's MANUAL
+  `python -m app.cleanup` (see worker/README.md) purges only
+  terminal + expired + un-purged jobs: job-scoped storage deletes
+  (sources + canonical clip objects) BEFORE the guarded `purged_at` marker —
+  idempotent, crash-safe, never scheduled automatically.
 - **Every object path is generated server-side**; the browser supplies only a
   file name (validated: no traversal, extension whitelist, MIME cross-check).
 - Uploads go **browser → Storage directly** (signed-URL PUT with real
@@ -238,6 +292,7 @@ Modules and their phases:
 | `app/storage` | Private Supabase Storage download + clip upload (path-shape validated, size-capped, upsert) + clip persistence (job-scoped, incl. captions payload) + local path utilities | 3 / 4 / 5 (done) |
 | `app/validation` | FFprobe media validation (container, streams, codecs, duration, size) | 3 (done) |
 | `app/config` | Pydantic settings (env-validated) + JSON structured logging | 1 / 4 / 5 |
+| `app/cleanup.py` | Manual artifact purge CLI (Phase 6): retention-policy candidates → job-scoped storage deletes → guarded `purged_at` marker; idempotent, NOT scheduled | 6 (done) |
 
 Ingestion loop (Phase 3): poll → `claim_next_job` (atomic) → bounded-
 concurrency processing (semaphore) → download to temp → FFprobe validate →
@@ -336,10 +391,24 @@ in logical order (libass/fribidi render the bidi). The job-level
 `captions_enabled` flag (Phase 2 column) gates the feature; when it is off,
 or a clip has no usable words, the command line is byte-for-byte Phase 5A.
 The output contract (MP4/H.264/AAC/1080x1920/yuv420p/zero rotation/
-duration) is unchanged — burn-in alters pixels only. Font rendering is
+ duration) is unchanged — burn-in alters pixels only. Font rendering is
 delegated to fontconfig (default `DejaVu Sans`, pinned in CI); Arabic
 contextual shaping additionally needs libharfbuzz in the FFmpeg build
 (deterministic fallback: the font's coverage / isolated glyphs).
+
+Retention & cleanup (Phase 6): the worker hosts a MANUAL purge service
+(`python -m app.cleanup`) — the only component that deletes storage
+objects, because Postgres cannot reach Storage. The policy is explicit in
+the migration (30 days after `completed`/`failed`, trigger-gated,
+operator-overridable, `jobs.purged_at` as the idempotency marker) and the
+purge re-verifies every precondition server-side before each deletion:
+terminal status, `expires_at < now`, `purged_at IS NULL`. Deletions are
+strictly job-scoped (source directory listing + clip rows whose
+`storage_path` matches the canonical shape AND the owning job — foreign or
+malformed paths are skipped and logged), storage is cleared BEFORE the
+guarded marker update (at-least-once: a crash between the two is resolved
+by a safe re-run), and no scheduler of any kind is wired — deletion is an
+explicit operator action until the policy is proven in a live environment.
 
 ## Job state machine
 
@@ -422,6 +491,22 @@ ACTIVE `rendering` row. States are defined in `src/config/app.ts` (frontend),
   transcribed content), the `ass=` path is filtergraph-escaped, the ASS
   file exists only in the per-job temp dir and is removed on every path;
   the font family is validated against markup characters at startup.
+- **Clip delivery is verification-gated** (Phase 6): a signed preview/
+  download URL is minted only after session verification, job ownership,
+  the job-scoped clip lookup, `ready` status, the canonical-path cross-check
+  against the OWNING job, and an object-existence check — and the URL points
+  at the server-derived path only (client-supplied paths are never trusted).
+  All failure shapes collapse to the same generic 404, so clip ids cannot be
+  enumerated. Signed URLs are short-lived (300s / 900s, configurable) and
+  the buckets remain private with no client policies.
+- **Destructive operations are policy-gated and job-scoped** (Phase 6):
+  artifact deletion happens ONLY through the manual worker purge, which
+  requires terminal status + explicit expiry + a null `purged_at` marker,
+  re-verified at execution time; every deleted object path must match the
+  server-generated shape for the job being purged; the DB marker is set only
+  AFTER the storage deletions (crash-safe at-least-once); nothing is
+  scheduled automatically, and jobs without an expiry marker are never
+  deleted.
 - **Secrets** live in environment variables only; `.env*` is gitignored;
   `.env.example` contains placeholders. Logs are structured JSON and never
   include credentials, signed URLs or raw file names beyond job ids.
@@ -519,9 +604,40 @@ Phase 5B (animated subtitles):
   idempotency, RLS and no-5A-regression asserted on a real PostgreSQL
   engine (pglite WASM).
 
+Phase 6 (results API & product completion):
+
+- `src/app/api/v1/jobs/[jobId]/results/route.ts` +
+  `.../clips/[clipId]/preview/route.ts` + `.../clips/[clipId]/download/route.ts`
+  + `.../download-all/route.ts` → the session-protected results API
+  (safe metadata, 300s/900s signed URLs, streamed ZIP; all verification-
+  gated and anti-enumeration-safe).
+- `src/lib/storage/clips.ts` → clip storage access (canonical path
+  derivation + owning-job cross-check, signed URL minting, metadata
+  existence listing, raw service-key object streaming for the ZIP) —
+  `server-only`, service-role only.
+- `src/lib/zip/store-zip.ts` + `src/lib/zip/filename.ts` → the streaming
+  STORE-ZIP engine (zero dependencies, chunk-at-a-time, deterministic) and
+  the single-segment filename sanitizer.
+- `src/lib/api/owned-job.ts` + `src/lib/jobs/results.ts` → the shared
+  ownership gate (incl. the clip-level 404-uniform variant) and job-scoped
+  clip data access.
+- `src/app/results/page.tsx` + `src/components/results/*` → the live results
+  page (`?job=<uuid>`): loading / auth / not-found / error / processing
+  (auto-poll) / failed / expired / empty / ready states, native `<video>`
+  previews from lazy signed URLs, per-clip downloads, Download-all anchor;
+  the state machine itself is pure (`src/lib/results/view.ts`) and unit-
+  tested. `src/components/processing/live-job-panel.tsx` → "View your clips"
+  CTA for completed jobs.
+- `supabase/migrations/20261123000000_phase6_results_retention.sql` →
+  additive: `jobs.purged_at` + the retention trigger (30 days after a
+  terminal transition, only when `expires_at IS NULL`).
+- `worker/app/cleanup.py` + `worker/tests/test_cleanup.py` → the manual,
+  idempotent, job-scoped purge (policy, scope, partial-failure safety, CLI).
+- `tests/database/phase6-retention.test.ts` → the retention trigger + marker
+  semantics asserted on a real PostgreSQL engine (pglite WASM).
+
 ## Remaining integration points (marked in code)
 
 | Location | Marker | Lands in |
 | --- | --- | --- |
 | `src/lib/jobs/service.ts` | `INTEGRATION POINT (authorized provider only)` | YouTube source materialization by an explicitly approved provider |
-| `src/app/results/page.tsx` | `DEVELOPMENT PLACEHOLDER DATA` | Results API (downloads + clip listing, Phase 6) |
