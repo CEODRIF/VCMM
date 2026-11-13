@@ -28,6 +28,17 @@ export interface YouTubeSourceProvider {
   /** Whether an authorized provider is configured and usable. */
   isAvailable(): boolean;
   /**
+   * Whether the provider can MATERIALIZE video media (not just metadata)
+   * through an authorized, policy-compliant mechanism.
+   *
+   * TASK 011: metadata capability NEVER implies materialization capability.
+   * The official YouTube APIs (Data API / oEmbed) expose metadata but NO
+   * media-download endpoint, so any honest implementation reports false
+   * here until a separately licensed ingestion path is explicitly approved
+   * and wired.
+   */
+  supportsMaterialization(): boolean;
+  /**
    * Fetches an authorized source video for the given URL and returns its
    * metadata. Must never run in the browser.
    */
@@ -42,6 +53,12 @@ class UnconfiguredYouTubeProvider implements YouTubeSourceProvider {
     // A provider becomes available only when an operator explicitly configures
     // an authorized integration (name + credentials) in the server environment.
     // No such integration ships with this codebase.
+    return false;
+  }
+
+  supportsMaterialization(): boolean {
+    // Honest capability: no authorized media-download mechanism exists in
+    // this codebase (official APIs expose none; no downloader of record).
     return false;
   }
 

@@ -3,12 +3,12 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { CheckCircle2, Info, Loader2, RefreshCw, Square, Wand2, Youtube } from "lucide-react";
+import { CheckCircle2, Info, Loader2, RefreshCw, Square, Twitch, Upload, Wand2, Youtube } from "lucide-react";
 
 import { appConfig } from "@/config/app";
 import type { SourceType } from "@/types";
 import { cn, formatBytes } from "@/lib/utils";
-import { validateClipCount, validateClipDuration, validateYoutubeUrl } from "@/lib/validation/clips";
+import { validateClipCount, validateClipDuration, validateTwitchUrl, validateYoutubeUrl } from "@/lib/validation/clips";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -54,6 +54,7 @@ export function CreationForm() {
 
   const [sourceType, setSourceType] = React.useState<SourceType>("youtube");
   const [youtubeUrl, setYoutubeUrl] = React.useState("");
+  const [twitchUrl, setTwitchUrl] = React.useState("");
   const [file, setFile] = React.useState<File | null>(null);
   const [clipCount, setClipCount] = React.useState<number>(clips.defaultCount);
   const [duration, setDuration] = React.useState<number>(clips.defaultSeconds);
@@ -198,6 +199,9 @@ export function CreationForm() {
     if (sourceType === "youtube") {
       const urlCheck = validateYoutubeUrl(youtubeUrl);
       if (!urlCheck.valid) nextErrors.source = urlCheck.error;
+    } else if (sourceType === "twitch") {
+      const urlCheck = validateTwitchUrl(twitchUrl);
+      if (!urlCheck.valid) nextErrors.source = urlCheck.error;
     } else if (!file) {
       nextErrors.source = "Drop a video file or pick one from your device.";
     }
@@ -214,14 +218,15 @@ export function CreationForm() {
       const response = await fetch("/api/v1/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sourceType,
-          youtubeUrl: sourceType === "youtube" ? youtubeUrl.trim() : undefined,
-          fileName: sourceType === "upload" ? file?.name : undefined,
-          clipCount,
-          clipDurationSeconds: duration,
-          captionsEnabled,
-        }),
+          body: JSON.stringify({
+            sourceType,
+            youtubeUrl: sourceType === "youtube" ? youtubeUrl.trim() : undefined,
+            twitchUrl: sourceType === "twitch" ? twitchUrl.trim() : undefined,
+            fileName: sourceType === "upload" ? file?.name : undefined,
+            clipCount,
+            clipDurationSeconds: duration,
+            captionsEnabled,
+          }),
       });
       const data = (await response.json().catch(() => null)) as {
         error?: string;
@@ -232,8 +237,10 @@ export function CreationForm() {
         setAuthRequired(true);
         return;
       }
-      if (!response.ok || !data?.job) {
-        // Includes 503 "YouTube provider not configured" with a clear message.
+        if (!response.ok || !data?.job) {
+        // Includes 503 "YouTube/Twitch provider not configured" (or
+        // "materialization not supported") with a clear, safe message —
+        // no job was created, so no misleading job state can exist.
         setServerError(data?.error ?? "Could not create the job. Try again.");
         return;
       }
@@ -267,14 +274,15 @@ export function CreationForm() {
       <Card className="card-surface animate-fade-in">
         <CardHeader>
           <CardTitle>Source</CardTitle>
-          <CardDescription>Paste a YouTube URL or upload a video file.</CardDescription>
+          <CardDescription>Paste a YouTube or Twitch URL, or upload a video file.</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-5">
-          <div className="flex gap-2" role="tablist" aria-label="Source type">
+          <div className="flex flex-wrap gap-2" role="tablist" aria-label="Source type">
             {(
               [
-                { value: "youtube", label: "YouTube URL" },
-                { value: "upload", label: "Upload file" },
+                { value: "youtube", label: "YouTube URL", icon: <Youtube size={15} /> },
+                { value: "twitch", label: "Twitch VOD", icon: <Twitch size={15} /> },
+                { value: "upload", label: "Upload file", icon: <Upload size={15} /> },
               ] as const
             ).map((tab) => (
               <button
@@ -295,7 +303,7 @@ export function CreationForm() {
                     : "border-input bg-background/40 text-muted-foreground hover:text-foreground"
                 )}
               >
-                <Youtube size={15} />
+                {tab.icon}
                 {tab.label}
               </button>
             ))}
@@ -326,6 +334,34 @@ export function CreationForm() {
               )}
               <p className="text-xs text-muted-foreground">
                 YouTube sources require an authorized source provider; if none is configured on this
+                deployment you will get a clear message, and direct upload always works.
+              </p>
+            </div>
+          ) : sourceType === "twitch" ? (
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="twitch-url">Twitch VOD URL</Label>
+              <Input
+                id="twitch-url"
+                type="url"
+                inputMode="url"
+                placeholder="https://twitch.tv/videos/123456789"
+                value={twitchUrl}
+                disabled={busy}
+                onChange={(event) => {
+                  setTwitchUrl(event.target.value);
+                  setErrors((previous) => ({ ...previous, source: undefined }));
+                  resetTransientState();
+                }}
+                aria-invalid={errors.source ? true : undefined}
+                className={cn(errors.source && "border-destructive focus-visible:ring-destructive")}
+              />
+              {errors.source && (
+                <p className="text-sm text-destructive" role="alert">
+                  {errors.source}
+                </p>
+              )}
+              <p className="text-xs text-muted-foreground">
+                Twitch sources require an authorized source provider; if none is configured on this
                 deployment you will get a clear message, and direct upload always works.
               </p>
             </div>
