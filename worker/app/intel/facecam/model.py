@@ -75,14 +75,9 @@ class MediaPipeFacecamModel:
         FacecamModelError → honest unavailable (no partial fabrication)."""
 
         def _build() -> None:
-            try:
-                import mediapipe as mp  # noqa: PLC0415 — optional dependency
-                from mediapipe.tasks.python import vision  # noqa: PLC0415
-                from mediapipe.tasks.python.core.base_options import BaseOptions  # noqa: PLC0415
-            except ImportError as exc:
-                raise FacecamModelError("mediapipe is not installed (optional extra: "
-                                         "worker/requirements-facecam.txt)") from exc
-
+            # Validate the EXPLICITLY configured model files first (pure
+            # python, deterministic in every environment — a misconfigured
+            # path is reported even when the optional dependency is absent).
             cfg = self._cfg
             for label, path in (
                 ("detector model", cfg.detector_model_path),
@@ -92,6 +87,14 @@ class MediaPipeFacecamModel:
                     raise FacecamModelError(f"{label} is not a readable file: {Path(path).name}")
             if cfg.detector_model_path is None:
                 raise FacecamModelError("no detector model configured")
+
+            try:
+                import mediapipe as mp  # noqa: PLC0415 — optional dependency
+                from mediapipe.tasks.python import vision  # noqa: PLC0415
+                from mediapipe.tasks.python.core.base_options import BaseOptions  # noqa: PLC0415
+            except ImportError as exc:
+                raise FacecamModelError("mediapipe is not installed (optional extra: "
+                                         "worker/requirements-facecam.txt)") from exc
 
             delegate = BaseOptions.Delegate.CPU  # CPU-only by policy
             self._mp = mp

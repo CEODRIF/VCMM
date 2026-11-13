@@ -481,10 +481,14 @@ def test_missing_model_file_is_honest_unavailable():
     run(a.close())
 
 
-def test_missing_dependency_is_honest_unavailable(monkeypatch):
-    # Force `import mediapipe` to fail (the base-install case).
+def test_missing_dependency_is_honest_unavailable(monkeypatch, tmp_path):
+    # Force `import mediapipe` to fail (the base-install case). A dummy
+    # model FILE passes the path validation first, so the honest reason
+    # reported is the missing dependency — in every environment.
+    dummy = tmp_path / "det.tflite"
+    dummy.write_bytes(b"not-a-real-model")
     monkeypatch.setitem(sys.modules, "mediapipe", None)
-    cfg = FacecamConfig(detector_model_path=str(MODELS_DIR / "blaze_face_short_range.tflite"))
+    cfg = FacecamConfig(detector_model_path=str(dummy))
     a = MediaPipeFacecamAnalyzer(cfg)
     rep = run(a.analyze_chunk("ffmpeg", Path("/nonexistent"), 0.0, 10.0, Path("/tmp/md")))
     assert rep.available is False
