@@ -29,6 +29,7 @@ WORKER_MODULES = [
     "app.rendering.profiles",
     "app.rendering.ffmpeg",
     "app.rendering.validation",
+    "app.rendering.captions",
     "app.rendering.renderer",
     "app.processors.rendering",
     "app.worker",

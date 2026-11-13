@@ -183,3 +183,27 @@ def test_target_60_and_180_stay_inside_db_bounds():
         clips = detector.detect_scored(_talk(total_seconds=400), 2, target)
         for clip in clips:
             assert 60 <= clip.end - clip.start <= 180
+
+
+def test_clips_carry_real_words_clipped_to_window():
+    detector = TranscriptClipDetector()
+    segments = _talk()
+    clips = detector.detect_scored(segments, 2, TARGET)
+    assert clips
+    all_token_words = {t.word for seg in segments for t in seg.words}
+    for c in clips:
+        assert c.words, "a clip must carry its real words (Phase 5B captions)"
+        for t in c.words:
+            assert t.word in all_token_words  # never fabricated
+            assert c.start <= t.start < t.end <= c.end
+        for a, b in zip(c.words, c.words[1:]):
+            assert a.end <= b.start  # non-overlapping, in order
+
+
+def test_clips_without_word_timestamps_use_honest_proportional_tokens():
+    detector = TranscriptClipDetector()
+    clips = detector.detect_scored(_talk(with_words=False), 2, TARGET)
+    for c in clips:
+        assert c.words  # derived from the transcribed text, not invented
+        for t in c.words:
+            assert c.start <= t.start < t.end <= c.end

@@ -90,6 +90,11 @@ class ScoredClip:
     score: float  # 0-100
     criterions: tuple[CriterionScore, ...] = field(default_factory=tuple)
     scoring: dict = field(default_factory=dict)
+    #: Real transcribed words overlapping [start, end] (ABSOLUTE audio time),
+    #: clipped to the window (Phase 5B captions). Never fabricated: only the
+    #: transcribed tokens themselves (or their honest proportional
+    #: interpolation when the provider gives no word timings).
+    words: tuple[TimedToken, ...] = field(default_factory=tuple)
 
     def as_candidate(self) -> ClipCandidate:
         return ClipCandidate(start=self.start, end=self.end, score=self.score, title=self.title)
@@ -250,6 +255,17 @@ class TranscriptClipDetector(BaseClipDetector):
             span_sentences = sentences[i : j + 1]
             start, end = span_sentences[0].start, span_sentences[-1].end
             criterions = score_candidate(start, end, span_sentences, all_words, float(duration_seconds))
+            # Phase 5B: the clip's REAL words, clipped to the window (the
+            # caption engine never invents text or timings).
+            clip_words = tuple(
+                TimedToken(
+                    word=t.word,
+                    start=round(max(t.start, start), 3),
+                    end=round(min(t.end, end), 3),
+                )
+                for t in all_words
+                if t.end > start and t.start < end and t.end > t.start
+            )
             scored.append(
                 ScoredClip(
                     start=round(start, 3),
@@ -258,6 +274,7 @@ class TranscriptClipDetector(BaseClipDetector):
                     score=round(sum(c.weight * c.value for c in criterions) * 100.0, 2),
                     criterions=tuple(criterions),
                     scoring=scoring_payload(criterions),
+                    words=clip_words,
                 )
             )
 
