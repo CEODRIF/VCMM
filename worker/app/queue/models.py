@@ -68,6 +68,31 @@ ERROR_NO_CLIPS_TO_RENDER = "no_clips_to_render"
 # from checkpoints and retries the failed chunk). NEVER a silent incomplete
 # success.
 ERROR_INTEL_ANALYSIS = "intel_analysis_failed"
+# Phase 8 (TASK 011 — source providers):
+# The provider is not configured/enabled on this deployment (retries
+# cannot configure it).
+ERROR_PROVIDER_UNAVAILABLE = "provider_unavailable"
+# The URL is malformed or not claimed by any adapter (input cannot change).
+ERROR_PROVIDER_INVALID_URL = "provider_invalid_url"
+# The deployment's provider credentials failed (expired token, bad
+# grant) — the operator must act, so the job must not burn retries.
+ERROR_PROVIDER_UNAUTHORIZED = "provider_unauthorized"
+# The source exists but is not usable: deleted/expired, private,
+# age/region-restricted, live, or a platform policy the deployment
+# cannot authorize (input cannot change for this job).
+ERROR_SOURCE_REJECTED = "source_rejected"
+# Metadata is permitted but NO authorized materialization path exists
+# for this provider (spec: expose as unsupported, never work around).
+ERROR_MATERIALIZATION_UNSUPPORTED = "materialization_unsupported"
+# The provider could not be reached / answered malformed / timed out
+# (transient: the next claim may succeed).
+ERROR_PROVIDER_METADATA = "provider_metadata_unavailable"
+# Provider rate limit — retryable (bounded by the job attempt budget).
+ERROR_PROVIDER_RATE_LIMITED = "provider_rate_limited"
+# A permitted transfer broke (network/provider fault) — retryable.
+ERROR_TRANSFER_INTERRUPTED = "transfer_interrupted"
+# Materialized file could not be stored in the private bucket — retryable.
+ERROR_SOURCE_UPLOAD = "source_upload_failed"
 # The analysis resume budget was exhausted without completion (a genuinely
 # stuck run) — permanent.
 ERROR_INTEL_RESUME_EXHAUSTED = "intel_resume_exhausted"
@@ -89,5 +114,11 @@ PERMANENT_ERROR_CATEGORIES = frozenset(
         ERROR_NO_CLIPS,
         ERROR_RENDER_INVALID,
         ERROR_NO_CLIPS_TO_RENDER,
+        # TASK 011: provider inputs/authorizations cannot change on retry
+        ERROR_PROVIDER_UNAVAILABLE,
+        ERROR_PROVIDER_INVALID_URL,
+        ERROR_PROVIDER_UNAUTHORIZED,
+        ERROR_SOURCE_REJECTED,
+        ERROR_MATERIALIZATION_UNSUPPORTED,
     }
 )

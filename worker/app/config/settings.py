@@ -246,6 +246,49 @@ class Settings(BaseSettings):
     multimodal_max_candidates: int = Field(default=200, ge=1, le=1000)
     multimodal_processing_budget_seconds: float = Field(default=30.0, gt=0, le=600)
 
+    # -- Phase 8: source providers (TASK 011) -----------------------------------
+    #: Master switch for the provider layer (youtube/twitch jobs). OFF →
+    #: provider jobs fail permanently with a clear "disabled" error;
+    #: direct uploads are UNAFFECTED either way.
+    source_providers_enabled: bool = True
+    #: Official YouTube Data API v3 key (server-side; never logged).
+    #: Optional: without it (and without OAuth below) metadata still works
+    #: via the KEYLESS official oEmbed endpoint (partial — honest).
+    youtube_api_key: str | None = None
+    #: OAuth user-credential flow (lets the USER's authorized context read
+    #: unlisted/private metadata). Minimum scopes for metadata: "openid".
+    #: Server-side only — never exposed to clients or logs.
+    youtube_oauth_client_id: str | None = None
+    youtube_oauth_client_secret: str | None = None
+    youtube_oauth_refresh_token: str | None = None
+    youtube_oauth_scopes: str = Field(default="openid", min_length=0, max_length=500)
+    #: Official Twitch application credentials (server-side). The client
+    #: id alone is the official minimum for public VOD metadata (Client-Id
+    #: header mode); id + secret enables the app-access-token flow.
+    twitch_client_id: str | None = None
+    twitch_client_secret: str | None = None
+    #: Official endpoint bases (overridable for tests/private mirrors).
+    twitch_api_base: str = "https://api.twitch.tv/helix"
+    twitch_oauth_base: str = "https://id.twitch.tv"
+    #: Provider API request timeout (metadata + token exchanges).
+    provider_request_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    #: Bounded retries for TRANSIENT provider failures (rate limits /
+    #: 5xx / network) — never a retry loop; the job attempt budget still
+    #: applies on top.
+    provider_max_retries: int = Field(default=2, ge=0, le=5)
+    provider_retry_backoff_seconds: float = Field(default=1.5, ge=0, le=60)
+    # -- Materialization budgets (authorized transfers only) ---------------------
+    #: Hard cap on a materialized source (same default as direct uploads).
+    materialize_max_source_bytes: int = Field(default=2 * 1024**3, ge=1 * 1024**2)
+    #: Cap on stream redirects (each hop is re-validated by the SSRF guard).
+    materialize_max_redirects: int = Field(default=3, ge=0, le=8)
+    #: Streaming chunk size — bounds transfer memory (NEVER a whole video).
+    materialize_chunk_bytes: int = Field(default=1024 * 1024, ge=64 * 1024, le=16 * 1024**2)
+    #: Optional duration gate for materialized sources. Default None =
+    #: NO cap (the TASK 007 decision — long recordings analyze
+    #: incrementally); the MECHANISM exists so a deployment can cap it.
+    materialize_max_duration_seconds: float | None = Field(default=None, ge=0)
+
     @field_validator("transcription_language")
     @classmethod
     def _empty_language_to_none(cls, value: str | None) -> str | None:
@@ -257,6 +300,40 @@ class Settings(BaseSettings):
     def _empty_roi_to_none(cls, value: str | None) -> str | None:
         """An empty env var means 'full frame', not the literal ''."""
         return value or None
+
+    @field_validator(
+        "youtube_api_key",
+        "youtube_oauth_client_id",
+        "youtube_oauth_client_secret",
+        "youtube_oauth_refresh_token",
+        "twitch_client_id",
+        "twitch_client_secret",
+    )
+    @classmethod
+    def _empty_provider_secret_to_none(cls, value: str | None) -> str | None:
+        """An empty env var means 'not configured', not the literal ''
+        (secret strings are never echoed by validators or logs)."""
+        return value or None
+
+    @model_validator(mode="after")
+    def _provider_secrets_consistent(self) -> "Settings":
+        """Fail fast on half-configured provider credentials (a client id
+        without its secret would only surface as a 401 at request time)."""
+        if self.twitch_client_id and not self.twitch_client_secret:
+            # Intentionally ALLOWED: the official Client-Id-header mode
+            # (public VOD metadata) needs only the id. Documented.
+            pass
+        if (self.youtube_oauth_client_id or self.youtube_oauth_client_secret
+                or self.youtube_oauth_refresh_token) and not (
+                self.youtube_oauth_client_id
+                and self.youtube_oauth_client_secret
+                and self.youtube_oauth_refresh_token
+        ):
+            raise ValueError(
+                "WORKER_YOUTUBE_OAUTH_CLIENT_ID, WORKER_YOUTUBE_OAUTH_CLIENT_SECRET "
+                "and WORKER_YOUTUBE_OAUTH_REFRESH_TOKEN must be set together"
+            )
+        return self
 
     @model_validator(mode="after")
     def _chunking_sane(self) -> "Settings":
