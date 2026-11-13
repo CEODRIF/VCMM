@@ -51,6 +51,26 @@ class SupabaseStorage:
         self._max_bytes = max_download_bytes
         self._max_clip_bytes = max_clip_bytes or max_download_bytes
 
+    async def ping(self) -> bool:
+        """Readiness probe (TASK 012): one bounded, metadata-only listing of
+        the sources bucket. True when storage is reachable. Never raises."""
+        try:
+            await self._client.storage.from_(SOURCES_BUCKET).list("", {"limit": 1})
+            return True
+        except Exception:  # noqa: BLE001 — probe boundary
+            return False
+
+    async def aclose(self) -> None:
+        """TASK 012: release the storage HTTP client on shutdown (supabase
+        AsyncClient keeps the storage3 httpx client on ``_client``).
+        Best-effort — never raises; safe to call alongside queue.aclose()."""
+        try:
+            http = getattr(getattr(self._client, "storage", None), "_client", None)
+            if http is not None and not getattr(http, "is_closed", True):
+                await http.aclose()
+        except Exception:  # noqa: BLE001
+            pass
+
     async def download_to(self, object_path: str, destination: Path) -> int:
         """Streams ``object_path`` to ``destination``; returns bytes written.
 
@@ -97,6 +117,9 @@ class SupabaseStorage:
                 object_path.split("/")[1] if "/" in object_path else "unknown",
                 exc.__class__.__name__,
             )
+            from ..observability import metrics as m
+
+            m.observe_storage_failure("download")
             raise StorageDownloadError("source download failed") from exc
 
     async def upload_source(self, job_id: str, source_file: Path,
@@ -144,6 +167,9 @@ class SupabaseStorage:
         except Exception as exc:  # noqa: BLE001 — transport boundary
             logger.warning("source upload failed for job %s: %s",
                            job_id, exc.__class__.__name__)
+            from ..observability import metrics as m
+
+            m.observe_storage_failure("upload_source")
             raise StorageUploadError("source upload failed") from exc
         return object_path
 
@@ -178,5 +204,8 @@ class SupabaseStorage:
             )
         except Exception as exc:  # noqa: BLE001 — transport boundary
             logger.warning("clip upload failed for %s: %s", object_path, exc.__class__.__name__)
+            from ..observability import metrics as m
+
+            m.observe_storage_failure("upload_clip")
             raise StorageUploadError("clip upload failed") from exc
         return size

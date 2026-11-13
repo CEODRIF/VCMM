@@ -12,9 +12,14 @@ never own the same active job.
 
 from __future__ import annotations
 
+import time
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from supabase import Client
+
+from ..observability import context as log_context
+from ..observability import metrics as m
 
 
 class QueueError(RuntimeError):
@@ -25,27 +30,74 @@ class SupabaseQueue:
     def __init__(self, client: Client) -> None:
         self._client = client
 
+    async def ping(self) -> bool:
+        """Readiness probe (TASK 012): one bounded metadata read. True when
+        the database (and therefore the queue RPCs) is reachable. Never
+        raises — a probe failure is an 'error' status, not a crash."""
+        try:
+            rows = await self._client.table("jobs").select("id", count="exact").limit(1).execute()
+            return rows is not None
+        except Exception:  # noqa: BLE001 — probe boundary
+            return False
+
+    async def aclose(self) -> None:
+        """TASK 012: release the queue's HTTP client on shutdown.
+        supabase-py's AsyncClient has no top-level close; the underlying
+        postgrest client does. Best-effort — never raises."""
+        try:
+            await self._client.postgrest.aclose()
+        except Exception:  # noqa: BLE001
+            pass
+
     async def claim_next_job(self, worker_id: str, lease_seconds: int) -> Optional[dict[str, Any]]:
         """Atomically claim the oldest claimable job (or None).
 
         Claimable = queued, or validating with an expired lease (crash
         recovery of a job abandoned by a dead worker).
         """
-        return await self._rpc("claim_next_job", {"p_worker_id": worker_id, "p_lease_seconds": lease_seconds})
+        job = await self._rpc("claim_next_job", {"p_worker_id": worker_id, "p_lease_seconds": lease_seconds})
+        if job:
+            stage = m.stage_for_status(str(job.get("status") or ""))
+            m.jobs_claimed_total.inc({"stage": stage})
+            # First claim: the job's queue-wait time (created_at → now).
+            # Resume/recovery claims (attempt > 1) are NOT "queue wait".
+            if int(job.get("attempt_count") or 0) == 1:
+                wait = self._queue_wait_seconds(job.get("created_at"))
+                if wait is not None:
+                    m.observe_queue_wait(stage, wait)
+        return job
+
+    @staticmethod
+    def _queue_wait_seconds(created_at: Any) -> float | None:
+        try:
+            parsed = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds())
+        except (ValueError, TypeError):
+            return None
 
     async def renew_job_lease(self, job_id: str, worker_id: str, lease_seconds: int) -> bool:
-        return bool(await self._rpc("renew_job_lease", {"p_job_id": job_id, "p_worker_id": worker_id, "p_lease_seconds": lease_seconds}))
+        renewed = bool(await self._rpc("renew_job_lease", {"p_job_id": job_id, "p_worker_id": worker_id, "p_lease_seconds": lease_seconds}))
+        if not renewed:
+            # A rejected renewal means we lost ownership — the most
+            # operationally significant event in the queue.
+            m.lease_renewals_failed_total.inc()
+        return renewed
 
     async def update_job_progress(self, job_id: str, worker_id: str, progress: int) -> bool:
         return bool(await self._rpc("update_job_progress", {"p_job_id": job_id, "p_worker_id": worker_id, "p_progress": progress}))
 
     async def complete_job_ingestion(self, job_id: str, worker_id: str, source_metadata: dict[str, Any]) -> bool:
-        return bool(
+        completed = bool(
             await self._rpc(
                 "complete_job_ingestion",
                 {"p_job_id": job_id, "p_worker_id": worker_id, "p_source_metadata": source_metadata},
             )
         )
+        if completed:
+            m.jobs_completed_total.inc({"stage": m.stage_for_status(log_context.stage_var.get() or "validating")})
+        return completed
 
     async def fail_job(
         self,
@@ -66,10 +118,22 @@ class SupabaseQueue:
                 "p_permanent": permanent,
             },
         )
-        return str(result) if result is not None else "not_owner"
+        new_status = str(result) if result is not None else "not_owner"
+        if new_status != "not_owner":
+            # A real failure write (re-queue or terminal). Stage comes from
+            # the bound job context; the category is bounded to the known
+            # set (anything else → 'other').
+            m.jobs_failed_total.inc({
+                "stage": m.stage_for_status(log_context.stage_var.get() or ""),
+                "error_category": m._error_category(error_category),
+            })
+        return new_status
 
     async def release_job(self, job_id: str, worker_id: str) -> bool:
-        return bool(await self._rpc("release_job", {"p_job_id": job_id, "p_worker_id": worker_id}))
+        released = bool(await self._rpc("release_job", {"p_job_id": job_id, "p_worker_id": worker_id}))
+        if released:
+            m.jobs_released_total.inc({"stage": m.stage_for_status(log_context.stage_var.get() or "")})
+        return released
 
     async def complete_job_rendering(self, job_id: str, worker_id: str) -> bool:
         """Phase 5 terminal completion — the ONLY path to ``completed``.
@@ -78,7 +142,10 @@ class SupabaseQueue:
         in ``rendering``, and EVERY clip is ``ready`` WITH a ``storage_path``
         — a stale or buggy worker can never mark a job completed early.
         """
-        return bool(await self._rpc("complete_job_rendering", {"p_job_id": job_id, "p_worker_id": worker_id}))
+        completed = bool(await self._rpc("complete_job_rendering", {"p_job_id": job_id, "p_worker_id": worker_id}))
+        if completed:
+            m.jobs_completed_total.inc({"stage": "rendering"})
+        return completed
 
     async def requeue_incomplete_analysis(
         self, job_id: str, worker_id: str, max_resumes: int
