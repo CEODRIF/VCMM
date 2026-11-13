@@ -212,12 +212,62 @@ Seven phases, in order. Each phase ends with a shippable increment.
   (verified development project required; none was provisioned in this
   phase).
 
-## Phase 6 — Product completion
+## Phase 6 — Product completion ✅ (this commit)
 
-- Results page wired to the clips API: previews, titles, duration labels.
-- Individual MP4 downloads and "Download all (ZIP)".
-- Job/clip expiry + cleanup job for expired sessions and artifacts.
-- Real error surfaces (retries, clear failure messages) end to end.
+- **Results API** (session + ownership verified on EVERY request;
+  anti-enumeration extended to clip ids — non-UUID ⇒ 404 before any
+  session/DB round trip; foreign/missing/not-ready/object-missing are all
+  the same generic 404):
+  - `GET /api/v1/jobs/[id]/results` — the job + ONLY its clips
+    (`{id,title,duration,sortOrder,status,downloadable}`); `downloadable`
+    requires `ready` AND a canonical `clips/{job_id}/{clip_id}.mp4` path
+    cross-checked against the OWNING job; storage paths/ownership internals
+    never leave the server; completed jobs additionally get
+    `zip:{available,totalBytes,limitBytes}` (metadata-only) so the UI can
+    decide the Download-all UX before the click.
+  - `GET .../clips/[clipId]/preview` — 300s signed URL (inline), minted only
+    after session + ownership + clip/job + `ready` + canonical path +
+    object-existence verification; buckets stay private, no public URLs.
+  - `GET .../clips/[clipId]/download` — 900s signed URL (attachment) with a
+    server-sanitized single-segment filename (no traversal, no control
+    chars, length-capped, empty-title fallback).
+  - `GET .../download-all` — STREAMED STORE-method ZIP (zero new
+    dependencies): JSON guards first (409 not-completed / no clips / missing
+    objects, 413 over `MAX_ZIP_SIZE_BYTES` default 1 GiB), then an async
+    generator pipes each clip from Storage chunk by chunk (concurrency 1,
+    sort order, CRC in data descriptors) — server memory stays at one chunk,
+    no temp files; entry names sanitized + index-prefixed; client cancel
+    aborts the in-flight fetch and tears the response down (partial archives
+    are discarded; per-clip URLs remain the fallback).
+- **Results UI (live)**: `/results?job=<uuid>` renders a pure, unit-tested
+  state machine (loading → processing (auto-poll 2.5s) / ready / failed /
+  not-found / auth-required / error; ready splits into expired / empty /
+  clip grid). Real `<video>` previews from lazy per-clip signed URLs with
+  per-card retry, per-clip download buttons, Download-all anchor,
+  accessible (roles, `aria-live`/`aria-busy`, labels) and responsive. The
+  live processing panel gained a "View your clips" CTA on completion.
+- **Retention & cleanup (explicit policy BEFORE any deletion)**:
+  - Migration `20261123000000` (additive): `jobs.purged_at` + trigger — a
+    job transitioning to `completed`/`failed` gets `expires_at =
+    now() + 30 days`, only when NULL (operator deadlines win; the interval
+    is a constant in one trigger function).
+  - `worker/app/cleanup.py` — MANUAL `python -m app.cleanup` (NO scheduler
+    wired): terminal + expired + un-purged jobs only; per job re-verified
+    server-side, then job-scoped storage deletes (source directory +
+    canonical clip objects — foreign/malformed `storage_path` skipped and
+    logged), THEN the guarded `purged_at` update (at-least-once, crash-safe,
+    idempotent; never marks before deletion; jobs without a deadline are
+    never touched). 18 tests: scope, idempotency, partial-failure retry,
+    cross-job refusal, non-terminal protection, CLI exit codes.
+- **Tests**: results/preview/download API (authorization, cross-user
+  denial, anti-enumeration, signed-URL params, missing objects, hostile
+  filenames), streamed-ZIP route (valid archive parse-back, sanitized
+  names, determinism, 409/413 guards, cancellation, mid-stream failure),
+  view-state machine (all phases + expiry boundary), pglite retention
+  trigger (9), ZIP engine (10) — plus the full Phase 1-5 suites green.
+- Note: applied to a real Supabase project remains an explicit live step
+  (verified development project required; none was provisioned in this
+  phase), and the purge is an operator action by design until then.
 
 ## Phase 7 — Hardening & launch
 

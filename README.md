@@ -8,24 +8,25 @@ ClipForge AI is a web application that transforms long-form videos into short-fo
 - Vertical 9:16 output at 1080x1920 (1080p) with modern animated subtitles.
 - Individual downloads and ZIP batch downloads.
 
-> **Status: Phase 5B — animated word-synchronized subtitles.**
-> On top of Phase 5A (clip rendering pipeline: download, cut/reframe to
-> 1080x1920, FFprobe output contract, upload, DB-guarded completion), the
-> worker now burns modern animated subtitles into every rendered clip — in
-> the SAME FFmpeg command (libass `ass=` filter): the analysis stage
-> persists each clip's REAL word timings (`clips.captions`), the renderer
-> generates a deterministic ASS file (karaoke per-word progression, 3 words
-> per line, bottom safe area, outline; Arabic RTL / English / German,
-> configurable font and colors), and a clip without usable words renders
-> exactly as Phase 5A. (Phase 5A recap: the worker claims parked
-> `analyzing` jobs into a `rendering` stage, re-downloads the verified
-> source, cuts each detected clip window with a managed FFmpeg subprocess
-> — rotation-correct, aspect-ratio-preserving reframe to exact 1080x1920 —
-> validates the output (MP4 / H.264 / AAC / yuv420p / zero rotation /
-> duration tolerance), uploads to the private `clipforge-clips` bucket, and
-> completes the job ONLY through the database guard that requires every
-> clip `ready` with a stored object path.) Rendered output is NOT yet
-> displayed or downloadable (Phase 6). See `docs/ROADMAP.md`.
+> **Status: Phase 6 — results API & product completion.**
+> Rendered clips are now a usable end product: the Results page
+> (`/results?job=<id>`) is wired to a session-protected results API and
+> shows real video previews (short-lived signed URLs, private buckets
+> unchanged), clip titles/durations, per-clip MP4 downloads and
+> "Download all" as a streamed, size-capped ZIP (bounded concurrency,
+> sanitized filenames, cancellation-safe). Every route re-verifies session
+> + job ownership on every request; clips are delivered only after
+> verification against the owning job — no public URLs, no storage paths,
+> no enumeration. Artifacts carry an explicit retention policy (30 days
+> after a job reaches `completed`/`failed`, DB marker, operator deadlines
+> win) and a MANUAL, idempotent, job-scoped worker purge
+> (`python -m app.cleanup`) — nothing destructive is scheduled
+> automatically. (Phases 5A/5B recap: the worker renders each detected
+> clip to exact 1080x1920 H.264+AAC with rotation correction, burns
+> animated word-synchronized subtitles from the REAL transcription
+> (libass, deterministic ASS) into the same FFmpeg command, validates the
+> output contract, uploads to the private `clipforge-clips` bucket and
+> completes the job only through the DB guard.) See `docs/ROADMAP.md`.
 
 ## Technology stack
 
@@ -175,7 +176,7 @@ Server-side validation is implemented in `src/lib/env.ts` (zod) and
 
 1. Create a **development** Supabase project (free tier is fine).
 2. Store the project URL and keys in your environment (see table above).
-  3. Apply the seven migrations to the development project (Supabase dashboard
+  3. Apply the eight migrations to the development project (Supabase dashboard
     SQL editor or Supabase CLI), in order:
     - `supabase/migrations/20261113000000_initial_schema.sql` (Phase 1)
     - `supabase/migrations/20261114000000_phase2_job_settings_and_session_lookup.sql` (Phase 2)
@@ -184,6 +185,7 @@ Server-side validation is implemented in `src/lib/env.ts` (zod) and
     - `supabase/migrations/20261116000000_phase4_clip_analysis.sql` (Phase 4 — clip score/scoring columns, stage-aware queue RPCs, `analyzing` parked state)
     - `supabase/migrations/20261117000000_phase5_rendering.sql` (Phase 5A — `jobs.render_attempts` budget, `rendering` stage in the queue RPCs, `complete_job_rendering` guard, clips index)
     - `supabase/migrations/20261120000000_phase5b_captions.sql` (Phase 5B — `clips.captions jsonb`: the clip's real word-level timings for subtitle burn-in)
+    - `supabase/migrations/20261123000000_phase6_results_retention.sql` (Phase 6 — `jobs.purged_at` marker + retention trigger: 30 days after a terminal transition, only when `expires_at` is NULL)
 
 All seven are executed and asserted against a real PostgreSQL 16 engine (WASM)
 in the test suite (`tests/database/rls.test.ts`, `tests/database/queue.test.ts`,
@@ -304,7 +306,9 @@ pull requests:
   | Jobs parked at `analyzing` with detected clips | **Done** (stage-aware queue; crash recovery; bounded retries) |
   | Clip rendering pipeline (Phase 5A): claim parked → render cut/reframe/encode to 1080x1920 H.264+AAC → validate → upload to `clipforge-clips` → DB-guarded `completed` | **Done** (rotation-correct, aspect-ratio-preserving; resume + bounded render retries; no false `completed` possible) |
   | Animated subtitles (Phase 5B): real word timings persisted at analysis → deterministic ASS (karaoke per-word highlight, RTL/Unicode-safe) burned into the SAME FFmpeg render; job-level `captions_enabled` toggle; no words / disabled = Phase 5A output | **Done** (burn-in proven in rendered pixels; corrupt payloads degrade to plain render, never crash, never fabricate) |
-  | Subtitle burn-in / downloads | **Not implemented** (Phase 5b / Phase 6) |
+  | Results API (`GET .../results`, clip `preview`, `download`, `download-all`) | **Done** (session + ownership every request; verification-gated 300s/900s signed URLs; streamed size-capped ZIP; anti-enumeration at clip level) |
+  | Results UI (live) | **Done** (real previews/titles/durations, per-clip + ZIP downloads, loading/empty/processing/failed/expired states, auto-poll until completion) |
+  | Artifact retention + cleanup | **Done** (explicit 30-day policy via DB trigger + `purged_at` marker; manual idempotent job-scoped worker purge — not scheduled) |
 
 ## Known limitations
 
@@ -312,14 +316,24 @@ pull requests:
   queue/storage semantics are fully tested against a real PostgreSQL engine
   (WASM), but nothing has been applied to a live project — none was provided.
   End-to-end upload → queue → worker ingestion → rendering therefore still
-  requires: creating/applying the seven migrations to a verified development
-  project, setting the service-role credentials, and running the worker.
-  Until then, the app runs Phase 1-2 behavior and upload creation returns a
-  clear error when Supabase is not configured.
-- Phase 5B burns animated subtitles into the clips, but the Results page
-  still shows placeholder data: rendered clips are stored in the private
-  `clipforge-clips` bucket (object verified in tests, never exposed publicly)
-  and there is no download API yet (Phase 6).
+  requires: creating/applying the eight migrations to a verified development
+   project, setting the service-role credentials, and running the worker.
+   Until then, the app runs Phase 1-2 behavior and upload creation returns a
+   clear error when Supabase is not configured.
+- **ZIP downloads are streamed server-side but still run on serverless
+   compute.** Memory stays at a single fetch chunk and sizes are capped
+   (`MAX_ZIP_SIZE_BYTES`, default 1 GiB), but Vercel serverless execution
+   time and bandwidth are bounded — a very large set may be interrupted
+   mid-download. The per-clip signed-URL downloads remain the always-available
+   fallback (no server proxying at all). A worker-backed artifact store is the
+   documented Phase 7 option if large batches become common; no paid
+   infrastructure was introduced.
+- **Artifact cleanup is manual.** The retention policy (30 days after a
+   terminal state, explicit DB marker) and the idempotent purge are
+   implemented and tested, but NOTHING deletes artifacts automatically —
+   an operator runs `python -m app.cleanup`. This is deliberate: destructive
+   cleanup is not scheduled until the policy has been proven in a live
+   environment.
 - Subtitle rendering quality depends on the worker host's fonts/fontconfig:
   the default font is DejaVu Sans (pinned in CI). Arabic contextual shaping
   additionally requires an FFmpeg build with libharfbuzz (the CI apt build
