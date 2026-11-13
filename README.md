@@ -8,13 +8,17 @@ ClipForge AI is a web application that transforms long-form videos into short-fo
 - Vertical 9:16 output at 1080x1920 (1080p) with modern animated subtitles.
 - Individual downloads and ZIP batch downloads.
 
-> **Status: Phase 3 — video ingestion, Supabase Storage & worker queue.**
-> Real direct uploads to private Supabase Storage (server-signed upload URLs,
-> verified completion), FFprobe-based media validation in the Python worker,
-> and a Postgres-backed job queue with atomic claiming, leases and crash
-> recovery. On top of Phase 2's access-code authentication and session-scoped
-> job APIs. AI transcription/analysis and clip rendering arrive in Phases 4-5
-> (see `docs/ROADMAP.md`).
+> **Status: Phase 4 — AI processing engine (audio, transcription, clip detection).**
+> On top of Phase 3 (real direct uploads, FFprobe validation, Postgres job
+> queue with atomic claiming, leases and crash recovery) and Phase 2's
+> access-code authentication and session-scoped job APIs, the worker now
+> extracts the audio track (FFmpeg), transcribes it with a local,
+> credential-free Whisper engine (word-level timestamps, controlled
+> chunking for long recordings), detects complete-idea clip windows within
+> the requested 60-180s duration, scores them with an explainable
+> multi-criterion ranking, and persists the results to `clips`. A job
+> finishes Phase 4 **parked at `analyzing`** — rendering (Phase 5) picks
+> parked jobs up. See `docs/ROADMAP.md`.
 
 ## Technology stack
 
@@ -25,7 +29,7 @@ ClipForge AI is a web application that transforms long-form videos into short-fo
  | Database  | Supabase (Postgres) with Row Level Security                       |
  | Storage   | Supabase Storage (private buckets, signed upload URLs)            |
  | Worker    | Python 3.12, FastAPI, Pydantic, FFprobe, structured JSON logging  |
- | Pipeline  | Whisper (Phase 4), FFmpeg rendering (Phase 5)                     |
+ | Pipeline  | Local Whisper (faster-whisper, optional), FFmpeg rendering (Phase 5) |
  | Tests/CI  | Vitest, pytest, GitHub Actions                                    |
 
 ## Architecture overview
@@ -43,15 +47,17 @@ ClipForge AI is a web application that transforms long-form videos into short-fo
  └─────┬──────┘        (real progress,          │                            │
        │            cancel, retry)              └──────────────▲─────────────┘
        │                                                        │
-       │  5  poll status (2.5s)      atomic claim → download → │
-       └─────────────────────────────  FFprobe validate → ready│
-                                                  ┌─────────────┴───────────┐
-                                                  │  Python worker          │
-                                                  │  (separate service)     │
-                                                  │  ingestion (Phase 3);   │
-                                                  │  transcribe/analyze/    │
-                                                  │  render: Phases 4-5     │
-                                                  └─────────────────────────┘
+        │  5  poll status (2.5s)      atomic claim → download → │
+        └─────────────────────────────  FFprobe validate → ready│
+                                                   ┌─────────────┴───────────┐
+                                                   │  Python worker          │
+                                                   │  (separate service)     │
+                                                   │  ingestion (Phase 3) +  │
+                                                   │  transcription + clip   │
+                                                   │  analysis (Phase 4) →   │
+                                                   │  parked at analyzing;   │
+                                                   │  render: Phase 5        │
+                                                   └─────────────────────────┘
  ```
 
 Responsibilities of each component are detailed in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
@@ -153,17 +159,20 @@ Server-side validation is implemented in `src/lib/env.ts` (zod) and
 
 1. Create a **development** Supabase project (free tier is fine).
 2. Store the project URL and keys in your environment (see table above).
- 3. Apply the four migrations to the development project (Supabase dashboard
+ 3. Apply the five migrations to the development project (Supabase dashboard
     SQL editor or Supabase CLI), in order:
     - `supabase/migrations/20261113000000_initial_schema.sql` (Phase 1)
     - `supabase/migrations/20261114000000_phase2_job_settings_and_session_lookup.sql` (Phase 2)
     - `supabase/migrations/20261115000000_phase3_queue_and_ingestion.sql` (Phase 3 — queue columns, 9-state machine, restricted worker RPCs)
     - `supabase/migrations/20261115000001_phase3_storage_buckets.sql` (Phase 3 — private storage buckets; Supabase-specific)
+    - `supabase/migrations/20261116000000_phase4_clip_analysis.sql` (Phase 4 — clip score/scoring columns, stage-aware queue RPCs, `analyzing` parked state)
 
-All four are executed and asserted against a real PostgreSQL 16 engine (WASM)
+All five are executed and asserted against a real PostgreSQL 16 engine (WASM)
 in the test suite (`tests/database/rls.test.ts`, `tests/database/queue.test.ts`,
-`tests/database/storage-buckets.test.ts`), including deny-by-default RLS, the
-queue RPCs' atomicity/lease semantics, and the private-bucket configuration.
+`tests/database/phase4-queue.test.ts`, `tests/database/storage-buckets.test.ts`),
+including deny-by-default RLS, the queue RPCs' atomicity/lease semantics, the
+Phase 4 stage transitions (incl. crash recovery and the parked state), and the
+private-bucket configuration.
 
 Tables: `processing_sessions`, `jobs`, `clips` — all with RLS enabled and no
 anonymous policies (access is mediated exclusively by the server-side API).
@@ -202,13 +211,24 @@ authorization (session scoping, anti-enumeration), upload authorization
 (extension/MIME-spoof/size/path-traversal/rate-limit guards), upload completion
 (object verification, size mismatch, idempotency, state guards), database
 migrations, RLS and the queue RPCs (atomic claiming, concurrent workers, lease
-expiry/recovery, bounded retries, ownership scoping, anon denial) — all against
+expiry/recovery, bounded retries, ownership scoping, anon denial, **Phase 4
+stage-aware claiming, crash recovery in every active stage, the parked
+`analyzing` end state, and the explainable clip-score columns**) — all against
 a real PostgreSQL engine** (frontend); worker health + heartbeat, worker env
-configuration, queue client, **FFprobe media validation with synthetic
-FFmpeg-generated videos (valid / no-audio / no-video / corrupt / unsupported
-container / duration & size limits)**, ingestion lifecycle (download failure,
-permanent vs transient errors, lease-loss abort, temp cleanup), worker loop
-(claim, backoff, graceful shutdown) (worker).
+configuration, queue client (RPCs + Phase 4 guarded transitions), **FFprobe
+media validation with synthetic FFmpeg-generated videos (valid / no-audio /
+no-video / corrupt / unsupported container / duration & size limits), FFmpeg
+audio extraction (mono 16 kHz WAV, corrupt/missing/timeout paths), transcription
+providers (honest unavailability, factory routing, guarded real-Whisper smoke
+test, word-level timestamps, chunk splitting + midpoint-ownership merge), clip
+detection (60-180s band, sentence boundaries, overlap control, determinism,
+honest no-clip failures) and explainable scoring (5 weighted criteria with
+reasons)**, ingestion lifecycle (download failure, permanent vs transient
+errors, lease-loss abort, temp cleanup), **analysis lifecycle (happy path to
+parked, crash recovery, no-audio / no-speech / no-clips / unavailable-provider
+permanent failures, transient storage/transcription/persistence failures,
+ownership-loss abort, temp cleanup)**, worker loop (stage-aware dispatch,
+backoff, graceful shutdown) (worker).
 
 The media tests generate their synthetic videos on the fly (no binary fixtures
 committed). They use `ffprobe`/`ffmpeg` from PATH, or the npm statics
@@ -240,7 +260,8 @@ pull requests:
  | Postgres job queue (atomic claim, leases, retry, crash recovery) | **Done** (restricted RPCs, tested on a real Postgres engine) |
  | Worker ingestion (claim → download → FFprobe validation → `ready`) | **Done** (bounded concurrency, lease renewal, graceful shutdown) |
  | YouTube source provider | **Interface only** — no authorized provider ships with the repo; creation returns a clear 503, uploads are unaffected. No unauthorized downloader exists or may be added |
- | AI transcription / clip detection | **Not implemented** (Phase 4) |
+ | Worker analysis: audio extraction + local Whisper transcription + clip detection/scoring | **Done** (optional `faster-whisper` dependency; honest `transcription_unavailable` failure when not installed; word-level timestamps; 60-180s windows; explainable scores persisted to `clips`) |
+ | Jobs parked at `analyzing` with detected clips (rendering = Phase 5) | **Done** (stage-aware queue; crash recovery; bounded retries) |
  | Clip rendering / subtitles / downloads | **Not implemented** (Phases 5-6) |
 
 ## Known limitations
@@ -253,9 +274,16 @@ pull requests:
   setting the service-role credentials, and running the worker. Until then,
   the app runs Phase 1-2 behavior and upload creation returns a clear error
   when Supabase is not configured.
-- Jobs end ingestion at `ready`; nothing transcribes, analyzes or renders yet
-  (Phases 4-5), so no clips are produced and the Results page shows
-  placeholder data (Phase 6; downloads not implemented).
+- Jobs end ingestion at `ready` and end Phase 4 **parked at `analyzing`**:
+  the audio is transcribed and the detected clips (with explainable scores)
+  are persisted, but nothing is rendered yet (Phase 5), so the Results page
+  shows placeholder data until Phases 5-6 (downloads not implemented).
+- Transcription runs locally with the **optional** `faster-whisper`
+  dependency (`worker/requirements-optional.txt`). Without it the worker
+  starts normally and analysis jobs fail with a clear permanent
+  `transcription_unavailable` error — no fake output is ever produced. With
+  it, the first run downloads the selected model weights from Hugging Face
+  once (plain file download, no API/credentials/cost).
 - YouTube sources: only the provider interface exists. Without an explicitly
   approved, authorized source provider the API returns a clear 503. No
   yt-dlp/cookies/DRM-bypass path exists in this codebase and none may be

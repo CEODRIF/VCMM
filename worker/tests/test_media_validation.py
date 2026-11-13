@@ -12,13 +12,20 @@ import asyncio
 import pytest
 
 from app.queue.models import (
+    ERROR_AUDIO_EXTRACTION,
+    ERROR_CLIPS_PERSIST,
     ERROR_CORRUPT_MEDIA,
     ERROR_FFPROBE,
     ERROR_INVALID_FILE,
+    ERROR_NO_AUDIO,
+    ERROR_NO_CLIPS,
+    ERROR_NO_SPEECH,
     ERROR_NO_VIDEO_STREAM,
     ERROR_SOURCE_TOO_LARGE,
     ERROR_SOURCE_TOO_LONG,
     ERROR_STORAGE_DOWNLOAD,
+    ERROR_TRANSCRIPTION,
+    ERROR_TRANSCRIPTION_UNAVAILABLE,
     ERROR_UNSUPPORTED_FORMAT,
     ERROR_UNKNOWN,
     PERMANENT_ERROR_CATEGORIES,
@@ -145,13 +152,27 @@ def test_validate_media_enforces_file_size_limit():
 def test_error_category_split_permanent_vs_transient():
     # Unrecoverable input errors must never be retried...
     assert PERMANENT_ERROR_CATEGORIES == {
+        # Phase 3 (ingestion)
         ERROR_INVALID_FILE,
         ERROR_CORRUPT_MEDIA,
         ERROR_UNSUPPORTED_FORMAT,
         ERROR_NO_VIDEO_STREAM,
         ERROR_SOURCE_TOO_LARGE,
         ERROR_SOURCE_TOO_LONG,
+        # Phase 4 (analysis) — the input cannot change, or the deployment
+        # is missing a capability retries will not fix.
+        ERROR_NO_AUDIO,
+        ERROR_TRANSCRIPTION_UNAVAILABLE,
+        ERROR_NO_SPEECH,
+        ERROR_NO_CLIPS,
     }
     # ...while infrastructure errors are retryable.
-    for transient in (ERROR_STORAGE_DOWNLOAD, ERROR_FFPROBE, ERROR_UNKNOWN):
+    for transient in (
+        ERROR_STORAGE_DOWNLOAD,
+        ERROR_FFPROBE,
+        ERROR_AUDIO_EXTRACTION,
+        ERROR_TRANSCRIPTION,
+        ERROR_CLIPS_PERSIST,
+        ERROR_UNKNOWN,
+    ):
         assert transient not in PERMANENT_ERROR_CATEGORIES

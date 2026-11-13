@@ -41,6 +41,7 @@ class JobQueueEntry(BaseModel):
 
 
 # Error categories recorded on failed jobs (kept safe — no stack traces).
+# Phase 3 (ingestion):
 ERROR_INVALID_FILE = "invalid_file"
 ERROR_CORRUPT_MEDIA = "corrupt_media"
 ERROR_UNSUPPORTED_FORMAT = "unsupported_format"
@@ -49,9 +50,18 @@ ERROR_SOURCE_TOO_LARGE = "source_too_large"
 ERROR_SOURCE_TOO_LONG = "source_too_long"
 ERROR_STORAGE_DOWNLOAD = "storage_download"
 ERROR_FFPROBE = "ffprobe_failed"
+# Phase 4 (analysis):
+ERROR_NO_AUDIO = "no_audio"
+ERROR_AUDIO_EXTRACTION = "audio_extraction_failed"
+ERROR_TRANSCRIPTION = "transcription_failed"
+ERROR_TRANSCRIPTION_UNAVAILABLE = "transcription_unavailable"
+ERROR_NO_SPEECH = "no_speech"
+ERROR_NO_CLIPS = "no_clips_detected"
+ERROR_CLIPS_PERSIST = "clips_persistence_failed"
 ERROR_UNKNOWN = "unknown"
 
-#: Categories that must never be retried (the input cannot change).
+#: Categories that must never be retried (the input cannot change, or the
+#: deployment is missing a capability that retries will not fix).
 PERMANENT_ERROR_CATEGORIES = frozenset(
     {
         ERROR_INVALID_FILE,
@@ -60,5 +70,9 @@ PERMANENT_ERROR_CATEGORIES = frozenset(
         ERROR_NO_VIDEO_STREAM,
         ERROR_SOURCE_TOO_LARGE,
         ERROR_SOURCE_TOO_LONG,
+        ERROR_NO_AUDIO,
+        ERROR_TRANSCRIPTION_UNAVAILABLE,
+        ERROR_NO_SPEECH,
+        ERROR_NO_CLIPS,
     }
 )

@@ -42,17 +42,17 @@ const STATE_META: Record<ProcessingState, StateMeta> = {
   },
   ready: {
     label: "Ready",
-    description: "Ingestion complete. The AI pipeline (transcription and clip detection) continues in Phase 4.",
+    description: "Ingestion complete. A worker will transcribe the audio and detect clips next.",
     icon: PackageCheck,
   },
   transcribing: {
     label: "Transcribing",
-    description: "Running Whisper over the audio track.",
+    description: "Extracting the audio track and running Whisper transcription with word-level timing.",
     icon: FileAudio,
   },
   analyzing: {
     label: "Analyzing",
-    description: "Scoring moments for clip selection.",
+    description: "Detecting complete-idea moments and scoring them for clip selection.",
     icon: ScanSearch,
   },
   rendering: {

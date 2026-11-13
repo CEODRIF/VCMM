@@ -1,6 +1,10 @@
-"""Ingestion worker loop (Phase 3).
+"""Worker loop (Phase 3 ingestion + Phase 4 analysis).
 
-- Polls the queue and claims jobs atomically via the restricted RPC.
+- Polls the queue and claims jobs atomically via the restricted RPC
+  (stage-aware: queued → validating, ready → transcribing, expired active
+  stages recovered in place).
+- Dispatches by the claimed stage: ``validating`` → ingestion processor,
+  ``transcribing``/``analyzing`` → analysis processor.
 - Bounded concurrency (asyncio semaphore).
 - Lease renewal happens inside each job's processing task.
 - Exponential backoff on consecutive claim failures (transport errors).
@@ -16,8 +20,10 @@ import os
 import platform
 import time
 import uuid
+from typing import Optional
 
 from .config.settings import Settings
+from .processors.analysis import AnalysisProcessor, is_analysis_stage
 from .processors.ingestion import IngestionProcessor
 from .queue.supabase_queue import QueueError, SupabaseQueue
 from .storage.supabase_storage import SupabaseStorage
@@ -26,10 +32,18 @@ logger = logging.getLogger("clipforge.worker")
 
 
 class IngestionWorker:
-    def __init__(self, settings: Settings, queue: SupabaseQueue, storage: SupabaseStorage) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        queue: SupabaseQueue,
+        storage: SupabaseStorage,
+        analysis: Optional[AnalysisProcessor] = None,
+        ingestion: Optional[IngestionProcessor] = None,
+    ) -> None:
         self._settings = settings
         self._queue = queue
-        self._processor = IngestionProcessor(settings, queue, storage)
+        self._ingestion = ingestion or IngestionProcessor(settings, queue, storage)
+        self._analysis = analysis
         self._worker_id = f"{platform.node() or 'worker'}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self._semaphore = asyncio.Semaphore(settings.concurrency)
         self._active: set[asyncio.Task] = set()
@@ -59,10 +73,11 @@ class IngestionWorker:
     async def start(self) -> None:
         self._started_at = time.monotonic()
         self._stop.clear()
-        self._loop_task = asyncio.create_task(self._loop(), name="ingestion-loop")
-        logger.info("ingestion worker %s started (concurrency=%d, lease=%ds, poll=%.1fs)",
+        self._loop_task = asyncio.create_task(self._loop(), name="job-loop")
+        logger.info("worker %s started (concurrency=%d, lease=%ds, poll=%.1fs, analysis=%s)",
                     self._worker_id, self._settings.concurrency,
-                    self._settings.job_lease_seconds, self._settings.poll_interval)
+                    self._settings.job_lease_seconds, self._settings.poll_interval,
+                    "on" if self._analysis is not None else "off")
 
     async def stop(self) -> None:
         """Graceful shutdown: stop claiming; let in-flight jobs finish safely."""
@@ -77,7 +92,7 @@ class IngestionWorker:
         if self._active:
             logger.info("waiting for %d active job(s) to finish or release their leases", len(self._active))
             await asyncio.gather(*list(self._active), return_exceptions=True)
-        logger.info("ingestion worker %s stopped", self._worker_id)
+        logger.info("worker %s stopped", self._worker_id)
 
     # -- internals -------------------------------------------------------------
 
@@ -101,17 +116,35 @@ class IngestionWorker:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 — loop boundary
-                logger.exception("ingestion loop error: %s", exc.__class__.__name__)
+                logger.exception("worker loop error: %s", exc.__class__.__name__)
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=delay)
             except asyncio.TimeoutError:
                 pass
 
+    def _processor_for(self, job: dict):
+        """Stage-aware dispatch (Phase 4): validating → ingestion,
+        transcribing/analyzing → analysis."""
+        if is_analysis_stage(str(job.get("status") or "")):
+            if self._analysis is None:
+                return None
+            return self._analysis
+        return self._ingestion
+
     async def _guarded(self, job: dict) -> None:
         async with self._semaphore:
+            processor = self._processor_for(job)
+            if processor is None:
+                # Analysis-stage job but no analysis capability in this
+                # build: release gracefully (back to ready) instead of
+                # failing — another worker may handle it.
+                released = await self._queue.release_job(str(job["id"]), self._worker_id)
+                logger.warning("job %s: no analysis processor — released (%s)",
+                               job.get("id"), "ok" if released else "not_owner")
+                return
             processing_task = asyncio.current_task()
             try:
-                await self._processor.process_job(job, on_lease_lost=processing_task.cancel)
+                await processor.process_job(job, on_lease_lost=processing_task.cancel)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 — never kill the loop

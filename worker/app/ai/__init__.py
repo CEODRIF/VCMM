@@ -1,1 +1,5 @@
-"""AI clip detection. Placeholder contracts only — no models in Phase 1."""
+"""AI clip detection + explainable scoring (Phase 4).
+
+Textual/timing analysis of real transcriptions — no external model calls
+and no fabricated output.
+"""

@@ -56,6 +56,7 @@ beforeAll(async () => {
     "20261113000000_initial_schema.sql",
     "20261114000000_phase2_job_settings_and_session_lookup.sql",
     "20261115000000_phase3_queue_and_ingestion.sql",
+    "20261116000000_phase4_clip_analysis.sql",
   ];
   for (const file of files) {
     await db.exec(readFileSync(join(migrationsDir, file), "utf-8"));

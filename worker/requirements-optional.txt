@@ -1,0 +1,19 @@
+# =============================================================================
+# ClipForge AI worker — OPTIONAL Phase 4 dependencies (local transcription).
+#
+# NOT required for the worker to start: without these packages the worker
+# runs normally and analysis jobs fail HONESTLY with the permanent
+# 'transcription_unavailable' category — no fake output is ever produced.
+#
+#   pip install -r requirements.txt -r requirements-optional.txt
+#
+# Then set WORKER_WHISPER_MODEL (e.g. "small") to enable transcription.
+# Model weights are downloaded once from Hugging Face to the local cache on
+# first use (plain file download — no API, no cloud credentials, no cost).
+#
+# NOTE: `av` must stay < 16. faster-whisper 1.2.x calls av.open() with the
+# `metadata_errors` argument that PyAV removed in 16; av>=16 crashes the
+# engine on the first file.
+# =============================================================================
+faster-whisper==1.2.1
+av>=11,<16

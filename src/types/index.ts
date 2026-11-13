@@ -29,14 +29,13 @@ export interface Job {
   requestedClips: number;
   clipDurationSeconds?: number;
   status: ProcessingState;
-  /** 0-100. */
   progress: number;
-  errorMessage?: string;
   createdAt: string;
   completedAt?: string;
-  /** Set when the upload was verified and the job entered the queue. */
   enqueuedAt?: string;
-  expiresAt?: string;
+  /** Clips detected so far by the Phase 4 analysis (0 before it runs). */
+  clipsCount?: number;
+  errorMessage?: string;
 }
 
 /** A generated clip, mirroring the `clips` table. */

@@ -10,18 +10,22 @@ vi.mock("@/lib/db/jobs", () => ({
   insertJob: vi.fn(),
   findJobForSession: vi.fn(),
   listJobsForSession: vi.fn(),
+  setUploadAuthorization: vi.fn(),
+  markUploadComplete: vi.fn(),
+  countClipsForJob: vi.fn(),
 }));
 
 import { POST as POST_JOBS, GET as LIST_JOBS } from "@/app/api/v1/jobs/route";
 import { GET as GET_JOB } from "@/app/api/v1/jobs/[jobId]/route";
 import { findSessionByTokenHash } from "@/lib/db/sessions";
-import { findJobForSession, insertJob, listJobsForSession } from "@/lib/db/jobs";
+import { countClipsForJob, findJobForSession, insertJob, listJobsForSession } from "@/lib/db/jobs";
 import { sha256Hex } from "@/lib/security/crypto";
 
 const findSessionMock = findSessionByTokenHash as ReturnType<typeof vi.fn>;
 const insertMock = insertJob as ReturnType<typeof vi.fn>;
 const findJobMock = findJobForSession as ReturnType<typeof vi.fn>;
 const listMock = listJobsForSession as ReturnType<typeof vi.fn>;
+const countClipsMock = countClipsForJob as ReturnType<typeof vi.fn>;
 
 const SESSION_TOKEN = "b".repeat(64);
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
@@ -45,6 +49,7 @@ beforeEach(() => {
   insertMock.mockResolvedValue({ id: JOB_ID });
   findJobMock.mockResolvedValue(null);
   listMock.mockResolvedValue([]);
+  countClipsMock.mockResolvedValue(0);
 });
 
 describe("POST /api/v1/jobs — job creation", () => {
@@ -210,7 +215,19 @@ describe("GET /api/v1/jobs/[jobId] — status + anti-enumeration", () => {
     const body = (await response.json()) as { job: Record<string, unknown> };
     expect(body.job.id).toBe(JOB_ID);
     expect(body.job.status).toBe("queued");
+    expect(body.job.clipsCount).toBe(0);
+    expect(countClipsMock).toHaveBeenCalledWith(JOB_ID);
     expect(body.job).not.toHaveProperty("source_path");
+  });
+
+  it("reports the detected clip count for an analyzed job (Phase 4)", async () => {
+    findJobMock.mockResolvedValue({ ...ownJob, status: "analyzing" as const });
+    countClipsMock.mockResolvedValue(3);
+    const response = await GET_JOB(requestWithSession("GET", `/api/v1/jobs/${JOB_ID}`), {
+      params: { jobId: JOB_ID },
+    });
+    const body = (await response.json()) as { job: Record<string, unknown> };
+    expect(body.job.clipsCount).toBe(3);
   });
 
   it("returns 404 for a job owned by another session (indistinguishable from missing)", async () => {

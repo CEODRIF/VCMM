@@ -160,6 +160,23 @@ export async function setUploadAuthorization(
 }
 
 /**
+ * Counts the clips detected for one job (Phase 4). The count lets the UI
+ * recognize a job parked at 'analyzing' with its clips persisted (analysis
+ * finished, rendering is Phase 5) without exposing clip data yet.
+ */
+export async function countClipsForJob(jobId: string): Promise<number> {
+  const supabase = getSupabaseServerClient();
+  const { data, error } = await supabase
+    .from("clips")
+    .select("id")
+    .eq("job_id", jobId);
+  if (error) {
+    throw new Error(`Clip count failed: ${error.code ?? "unknown"}`);
+  }
+  return (data ?? []).length;
+}
+
+/**
  * Atomically marks the upload as completed: 'uploading' → 'queued'.
  * The state guard makes duplicate finalization impossible — only the first
  * caller transitions the row (the transition trigger enforces legality).
