@@ -9,12 +9,19 @@ import { Card, CardContent } from "@/components/ui/card";
 import type { Job } from "@/types";
 
 /**
- * States where polling stops: completed/failed are final, and 'ready' is
- * terminal FOR INGESTION (Phase 3) — the product pipeline continues in
- * Phase 4, so we do not burn polls on a job that will not change.
+ * Phase 4: polling stops on the final states (completed/failed) and when a
+ * job is PARKED at 'analyzing' with its clips already persisted — analysis is
+ * finished, rendering arrives in Phase 5, so the job will not change.
+ * 'ready' is no longer a stop state: a running worker claims it within one
+ * poll interval and moves it to 'transcribing'.
  */
-const POLL_STOP_STATES: ReadonlySet<Job["status"]> = new Set(["ready", "completed", "failed"]);
+const POLL_STOP_STATES: ReadonlySet<Job["status"]> = new Set(["completed", "failed"]);
 const POLL_INTERVAL_MS = 2500;
+
+function shouldStopPolling(job: Job): boolean {
+  if (POLL_STOP_STATES.has(job.status)) return true;
+  return job.status === "analyzing" && (job.clipsCount ?? 0) > 0;
+}
 
 interface PublicJob {
   id: string;
@@ -27,6 +34,7 @@ interface PublicJob {
   createdAt: string;
   completedAt?: string;
   enqueuedAt?: string | null;
+  clipsCount?: number;
   errorMessage?: string;
 }
 
@@ -81,12 +89,13 @@ export function LiveJobPanel({ jobId }: { jobId: string }) {
           createdAt: publicJob.createdAt,
           completedAt: publicJob.completedAt,
           enqueuedAt: publicJob.enqueuedAt ?? undefined,
+          clipsCount: publicJob.clipsCount,
           errorMessage: publicJob.errorMessage,
         };
         setJob(mapped);
         setLoading(false);
 
-        if (!POLL_STOP_STATES.has(mapped.status)) {
+        if (!shouldStopPolling(mapped)) {
           timer = setTimeout(fetchOnce, POLL_INTERVAL_MS);
         }
       } catch {

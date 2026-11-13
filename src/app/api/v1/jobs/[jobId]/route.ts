@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 
 import { requireSession } from "@/lib/api/auth";
 import { toErrorResponse } from "@/lib/api/errors";
-import { findJobForSession } from "@/lib/db/jobs";
+import { countClipsForJob, findJobForSession } from "@/lib/db/jobs";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -30,6 +30,9 @@ export async function GET(request: Request, context: { params: { jobId: string }
       return NextResponse.json({ error: "Job not found." }, { status: 404 });
     }
 
+    // Phase 4: how many clips were detected so far (0 until analysis runs).
+    const clipsCount = await countClipsForJob(jobId);
+
     return NextResponse.json({
       job: {
         id: row.id,
@@ -42,6 +45,7 @@ export async function GET(request: Request, context: { params: { jobId: string }
         createdAt: row.created_at,
         completedAt: row.completed_at,
         enqueuedAt: row.upload_completed_at,
+        clipsCount,
         errorMessage: row.status === "failed" ? (row.error_message ?? row.last_error ?? undefined) : undefined,
       },
     });
