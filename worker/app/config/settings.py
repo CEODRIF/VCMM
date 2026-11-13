@@ -42,6 +42,16 @@ class Settings(BaseSettings):
     poll_interval: float = Field(default=2.0, gt=0, le=60)
     #: How many jobs may be processed concurrently.
     concurrency: int = Field(default=2, ge=1, le=16)
+    # --- TASK 012: lifecycle hardening ---------------------------------------
+    #: Bounded graceful-shutdown grace period (seconds). Jobs still running
+    #: after it are ABANDONED (cancelled — no state write; the lease expires
+    #: and another worker recovers the job), never mis-failed.
+    worker_shutdown_grace_seconds: int = Field(default=600, ge=30, le=86400)
+    #: Startup cleanup age threshold for per-job temp directories abandoned
+    #: by a CRASHED worker (seconds). Deliberately far above the worst-case
+    #: single-claim wall time, and directories of this worker's ACTIVE jobs
+    #: are never touched — so a live job's scratch can never be deleted.
+    worker_tmp_stale_seconds: int = Field(default=172800, ge=3600)
     #: Lease duration claimed per job (seconds). Must be >= 30 (RPC rule).
     job_lease_seconds: int = Field(default=300, ge=30, le=3600)
     #: Reference retry budget; the authoritative per-job limit is the

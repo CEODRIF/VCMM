@@ -22,6 +22,7 @@ class FakeQueue:
         self.fail_calls: list[tuple[str, str, str, str, bool]] = []
         self.jobs_to_claim: list[dict] = []
         self.raise_queue_error_times = 0
+        self.closed = False
 
     async def claim_next_job(self, worker_id, lease_seconds):
         self.claims += 1
@@ -49,10 +50,27 @@ class FakeQueue:
     async def release_job(self, job_id, worker_id):
         return True
 
+    # TASK 012: readiness probe + connection cleanup contract.
+    async def ping(self):
+        return True
+
+    async def aclose(self):
+        self.closed = True
+
 
 class FakeStorage:
+    def __init__(self) -> None:
+        self.closed = False
+
     async def download_to(self, object_path, destination):
         raise AssertionError("storage should not be touched for non-upload jobs")
+
+    # TASK 012: readiness probe + connection cleanup contract.
+    async def ping(self):
+        return True
+
+    async def aclose(self):
+        self.closed = True
 
 
 def make_settings(tmp_path: Path) -> Settings:
