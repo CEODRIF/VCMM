@@ -134,6 +134,13 @@ class Settings(BaseSettings):
     #: How many candidate clips a completed run ranks out (the job can still
     #: request more; this is the analysis-side default).
     intel_requested_clips: int = Field(default=5, ge=1, le=25)
+    #: SAFETY CAP on incomplete-analysis resumes (Phase 7b). A resume is
+    #: progress, not a failure, so it is NOT bounded by the failure
+    #: ``max_attempts`` budget — it has its own cap. The value is generous
+    #: enough that NO legitimate recording (even at ``intel_chunks_per_claim``
+    #: = 1) can hit it, but a genuinely stuck pipeline eventually fails the
+    #: job instead of resuming forever. Env: WORKER_INTEL_MAX_RESUMES.
+    intel_max_resumes: int = Field(default=100000, ge=1)
 
     @field_validator("transcription_language")
     @classmethod

@@ -80,6 +80,30 @@ class SupabaseQueue:
         """
         return bool(await self._rpc("complete_job_rendering", {"p_job_id": job_id, "p_worker_id": worker_id}))
 
+    async def requeue_incomplete_analysis(
+        self, job_id: str, worker_id: str, max_resumes: int
+    ) -> str:
+        """Phase 7b: return an owned INCOMPLETE analysis job to ``ready``.
+
+        The job's per-claim chunk budget was exhausted (it is making progress,
+        not failing): it is re-queued to resume from its checkpoints on the
+        next claim. This does NOT consume the failure ``attempt_count`` budget
+        — a long recording legitimately needs many resume claims.
+
+        Returns ``'ready'`` (re-queued), ``'resume_exhausted'`` (the resume cap
+        was reached — the caller must record a failure; NO terminal write was
+        made here), or ``'not_owner'`` (ownership lost — the caller aborts).
+        """
+        result = await self._rpc(
+            "requeue_incomplete_analysis",
+            {
+                "p_job_id": job_id,
+                "p_worker_id": worker_id,
+                "p_max_resumes": max_resumes,
+            },
+        )
+        return str(result) if result is not None else "not_owner"
+
     # -- Phase 4: guarded direct updates (no RPC needed) -----------------------
     # These use the service-role REST client directly. Ownership is enforced
     # by scoping EVERY update to (id, status, locked_by = caller), and the

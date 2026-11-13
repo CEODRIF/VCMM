@@ -63,6 +63,14 @@ ERROR_RENDER_FAILED = "render_failed"
 ERROR_RENDER_INVALID = "render_invalid"
 ERROR_CLIP_UPLOAD = "clip_upload_failed"
 ERROR_NO_CLIPS_TO_RENDER = "no_clips_to_render"
+# Phase 7b (stream-intelligence integration):
+# A chunk failed irrecoverably for THIS run (transient: the next claim resumes
+# from checkpoints and retries the failed chunk). NEVER a silent incomplete
+# success.
+ERROR_INTEL_ANALYSIS = "intel_analysis_failed"
+# The analysis resume budget was exhausted without completion (a genuinely
+# stuck run) — permanent.
+ERROR_INTEL_RESUME_EXHAUSTED = "intel_resume_exhausted"
 ERROR_UNKNOWN = "unknown"
 
 #: Categories that must never be retried (the input cannot change, or the
