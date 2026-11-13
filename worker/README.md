@@ -278,6 +278,24 @@ startup (see `app/config/settings.py`):
 | `WORKER_GAME_VISION_TESSDATA_DIR` | *(unset)* | EXPLICIT directory containing `<language>.traineddata` (None = system default) |
 | `WORKER_GAME_VISION_TESSERACT_BINARY` | *(unset)* | EXPLICIT tesseract binary path (None = resolved from PATH) |
 | `WORKER_GAME_VISION_KILL_FEED_ROI` | `0.80,0.02,0.18,0.12` | Kill-feed region 'x,y,w,h' normalized (default top-right strip — a DEFAULT, not a game assumption; empty = full-frame scan) |
+| `WORKER_MULTIMODAL_ENABLED` | `false` | Phase 8 advanced multimodal fusion ENGINE (optional layer over Phase 7 fusion). OFF by default → the completion phase is byte-identical to Phase 7 (A/B pipeline test). ON → the same qualifying candidates (unchanged score bar) gain `heuristic_confidence` + size-bounded provenance. Pure over persisted events: no schema change, no new dependency, resumable |
+| `WORKER_MULTIMODAL_CORRELATION_WINDOW_SECONDS` | `2.5` | Temporal clustering window (0 < x ≤ 30; matches the Phase 7 default) |
+| `WORKER_MULTIMODAL_DECAY_TAU_SECONDS` | `2.5` | Temporal-decay constant for cross-family proximity weights, exp(−gap/τ) (0 < x ≤ 30) |
+| `WORKER_MULTIMODAL_SAME_KIND_MERGE_SECONDS` | `1.0` | Same family + kind within this gap (and same OCR content, where observable) = one physical signal (corroboration, never independence; 0 ≤ x ≤ 30) |
+| `WORKER_MULTIMODAL_CONFIDENCE_THRESHOLD` | `0.30` | Floor for a candidate's heuristic confidence (below → suppressed, recorded; 0 ≤ x ≤ 1) |
+| `WORKER_MULTIMODAL_MIN_INDEPENDENT_MODALITIES` | `1` | Minimum INDEPENDENT modality count for any candidate (1-4) |
+| `WORKER_MULTIMODAL_STRONG_AUDIO_ONLY_THRESHOLD` | `0.80` | Strength a strong audio-only solo anchor must reach (0 ≤ x ≤ 1) |
+| `WORKER_MULTIMODAL_PRE_PADDING_SECONDS` | `1.0` | Candidate boundary padding before the measured cluster span, clamped to the source (0 ≤ x ≤ 60) |
+| `WORKER_MULTIMODAL_POST_PADDING_SECONDS` | `2.0` | Candidate boundary padding after the measured cluster span, clamped (0 ≤ x ≤ 60) |
+| `WORKER_MULTIMODAL_SINGLE_SOURCE_MIN_STRENGTH` | `0.60` | One-family candidates below this max strength are suppressed (single-source repetition; a strong single-source moment still qualifies; 0 ≤ x ≤ 1) |
+| `WORKER_MULTIMODAL_MAX_EVENTS` | `5000` | Hard cap on fusion input events (time-ordered deterministic cut; `input_truncated` reported; 1-100000) |
+| `WORKER_MULTIMODAL_MAX_CLUSTERS` | `500` | Hard cap on correlation clusters (earliest kept; `clusters_dropped` reported; 1-10000) |
+| `WORKER_MULTIMODAL_MAX_SIGNALS_PER_CLUSTER` | `64` | Graph-node cap per cluster (overflow kept for scoring, never independent; 1-512) |
+| `WORKER_MULTIMODAL_MAX_EDGES_PER_NODE` | `8` | Graph-edge cap per node (1-64) |
+| `WORKER_MULTIMODAL_MAX_SEQUENCES_PER_CLUSTER` | `8` | Sequence-extraction cap per cluster (1-64) |
+| `WORKER_MULTIMODAL_MAX_SEQUENCE_LENGTH` | `4` | Longest multi-stage sequence (2-16) |
+| `WORKER_MULTIMODAL_MAX_CANDIDATES` | `200` | Output candidate cap (strongest first; `candidates_capped` reported; 1-1000) |
+| `WORKER_MULTIMODAL_PROCESSING_BUDGET_SECONDS` | `30` | Wall budget checked BETWEEN clusters (on budget: `status="budget_exceeded"` + `clusters_unprocessed` reported, analyzed work kept; 0 < x ≤ 600) |
 | `WORKER_CAPTION_FONT_FAMILY` | `DejaVu Sans` | libass font family (fontconfig-resolved; no markup characters) |
 | `WORKER_CAPTION_FONT_SIZE` | `88` | Glyph size in PlayRes pixels (24-200) |
 | `WORKER_CAPTION_BASE_COLOR` | `FFFFFF` | Spoken-word color (RRGGBB) — ASS PrimaryColour |

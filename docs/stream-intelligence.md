@@ -582,3 +582,166 @@ tests (PIL-rendered text) that skip cleanly without tesseract (CI runs
 them in a best-effort step). **Synthetic fixtures only — no real-world
 detection accuracy is claimed; there is no annotated real-VOD
 evaluation (known limitation).**
+
+## 15. Advanced Multimodal Fusion (TASK 010 — Phase 8)
+
+A temporal **multimodal intelligence engine** over the four signal
+families (audio, visual, facecam, game_vision) that correlates
+independently measured evidence across time, evaluates its quality,
+detects event sequences, and produces **explainable candidate moments**
+for the EXISTING selection. It is an **optional layer — not a
+replacement**: disabled (the default, `WORKER_MULTIMODAL_ENABLED=false`)
+the completion phase runs Phase 7 `fuse()` **exactly** as before
+(verified by an A/B pipeline test against an independent
+`fuse()` + `select_clips()` recomputation); enabled, the same
+qualifying candidates (the UNCHANGED `score_cluster` bar — identical
+scores) gain a conservative `heuristic_confidence` and size-bounded
+evidence provenance.
+
+**Architecture (`worker/app/intel/multimodal/`)** — five conceptual
+layers, one module each concern:
+
+1. **Normalization** (`timeline.py`) — a validated re-projection of the
+   existing `SignalEvent` contract (no competing schema): stable
+   `event_key`, absolute timestamps, family/kind, ORIGINAL strength,
+   original evidence (referenced, never mutated), detector identity,
+   DERIVED quality (OCR `ocr_confidence`/100 where measured; strength
+   elsewhere). Malformed events are **quarantined** (counted + recorded
+   with a safe reason), never crash the job. Deterministic ordering;
+   time-ordered input truncation at `max_events`.
+2. **Temporal correlation** (`correlation.py`) — deterministic
+   sweep-line clustering (one pass over time-ordered signals; the same
+   union-chain rule as Phase 7, `correlation_window_seconds` 2.5 s)
+   with a **three-tier duplicate-suppression** that implements
+   evidence independence:
+   - tier 1: same stable `event_key` → exact duplicate (one kept);
+   - tier 2: same family + kind within `same_kind_merge_seconds` (1 s)
+     AND, for OCR content (text / score values), the SAME observed
+     content → repeat of the SAME physical signal (corroboration only,
+     max strength kept). Two DIFFERENT OCR readings are never the same
+     physical signal — they may be contradictory;
+   - tier 3: same family, different kind (or same kind beyond the
+     merge gap) → RELATED: still ONE independent modality.
+   An independent modality is a distinct family — a loud burst and an
+   audio-derived excitement event from the same detector are never two
+   modalities; repeated face landmarks of one continuous reaction never
+   inflate; repeated OCR samples of one persistent kill-feed line never
+   inflate. Cross-family proximity is weighted by
+   `exp(-gap / decay_tau_seconds)`.
+3. **Interpretation** — `event_graph.py`: a bounded graph (nodes =
+   kept observations ≤ 64; edges = overlap/precedes/follows relations
+   within the window, ≤ 8 per node; a one-line temporal explanation) +
+   distinct-kind sequences (length ≤ 4, per-step start tolerance 2.5 s —
+   overlapping reactions still chain; persistent same-kind runs extend
+   a stage, never repeat it). `sequences.py`: five configurable,
+   conservative cross-modal PATTERNS (candidate interpretations, never
+   verified game state): `gameplay_elimination` (kill-feed anchor, ≥ 2
+   modalities), `high_impact_gameplay` (visual-change anchor, ≥ 2),
+   `match_victory` (match-result-text anchor, ≥ 1),
+   `unexpected_reaction` (facecam anchor, ≥ 2), `strong_audio_only`
+   (vocal anchor, ≥ 1, strength ≥ 0.80). Patterns carry a bounded
+   confidence bonus (0.10) and a **score bonus of 0.0 by default —
+   matching a pattern never inflates a score**; operators may opt in
+   explicitly.
+4. **Confidence & evidence** — `confidence.py`:
+   `heuristic_confidence` (version `mv1`), a bounded, deterministic
+   aggregate:
+
+   ```
+   base         = Σ w_f·max_strength_f / Σ w_f  (PRESENT families;
+                the existing FusionConfig weights — detector strengths
+                are PRESERVED)
+   independence = 1 + diversity_bonus·max(0, min(n_mods,3)−1)/2
+                (1 modality → 1.0 — a single modality gets NO credit;
+                3+ → 1 + bonus — bounded)
+   proximity    = mean cross-family exp(-gap/τ) (1.0 when nothing
+                measured — absence of data is NOT a penalty)
+   quality      = mean quality over ALL kept evidence (duplicates
+                included: a repeatedly low-quality read stays low)
+   pattern      = 1 + pattern.confidence_bonus when matched
+   penalties    = (1 − contradiction_penalty) per contradiction
+                · (1 − low_quality_penalty) if quality < 0.40
+   value        = clamp(base·independence·proximity·quality·pattern
+                ·penalties, 0, 1)
+   ```
+
+   **TERMINOLOGY (mandatory until calibration exists): this is
+   `heuristic_confidence` — NOT a statistically calibrated probability
+   of correctness.** No annotated real-VOD evaluation exists yet;
+   building one is TASK 013's scope. Every result exposes its FULL
+   calculation (base, per-family max strengths, independence,
+   proximity weights, quality mean, pattern, each penalty) plus the
+   version, so the number is always reproducible and auditable.
+   Detector confidence and fusion confidence are distinct fields
+   (quality vs heuristic_confidence). Contradictions are a deliberately
+   SMALL, explicit rule set (conflicting win/loss match-result readings
+   in one cluster); missing data / unavailable detectors are NEVER
+   negative evidence. `evidence.py`: size-bounded provenance per
+   candidate (≤ 8 KiB serialized — hard byte cap with a deterministic
+   shrink cascade, `provenance_truncated` flag when the cascade runs):
+   supporting event keys/families/kinds/timestamps/original strengths/
+   qualities/detectors (total always exact), independent observations
+   and modalities, temporal relationships, sequences, the matched
+   pattern, excluded/duplicate evidence (exact/repeated/overflow
+   counts), contradictions, availability snapshot, and the confidence
+   calc + version. Nothing that materially affects ranking is
+   silently discarded.
+5. **Candidate ranking** (`ranking.py`, `signals.py`) — measured
+   boundaries (cluster span ± padding, clamped to `[0, total_duration]`
+   — never negative, never beyond the source, never empty) with
+   deterministic suppression (recorded, never silent):
+   `below_min_score` (the SAME Phase 7 bar),
+   `insufficient_independent_modalities` (configurable floor, default
+   1), `below_confidence_threshold` (default 0.30 — enabled mode may
+   select LESS than Phase 7, never arbitrarily more),
+   `single_source_repetition` (one family below max strength 0.60),
+   `empty_interval` (defensive). Candidates capped at 200
+   (deterministic: strongest first). The adapter emits the SAME
+   `CandidateWindow` type Phase 7 returns (identical score/
+   qualification; upgraded confidence; `reasons["multimodal"]`
+   provenance), so selection, merge, dedup, categories, ranking and the
+   renderer are UNTOUCHED; `select_clips` passes the provenance through
+   into the clip evidence as a nested `multimodal` key (absent in
+   disabled mode — byte-compatible).
+
+**Integration**: `PipelineConfig.multimodal` (None = disabled) +
+`PipelineResult.multimodal` (the job-level engine summary). The engine
+is a **pure function of the persisted events** — chunk-compatible and
+resumable exactly like Phase 7 (re-running completion re-derives the
+same candidates from the same rows). Availability states are derived
+from the MEASURED modality summaries (never from import success):
+`disabled` / `unavailable` / `available` / `available_no_events` /
+`partial` / `failed` / `cancelled`, recorded per family in the summary
+and in each candidate's provenance. A single unavailable modality never
+fails the analysis.
+
+**Performance budgets (ENFORCED — deterministic truncation + honest
+reporting in the summary, never silent)**: input events ≤ 5000
+(time-ordered cut, `input_truncated`); clusters ≤ 500
+(`clusters_dropped` = earliest kept); signals/cluster ≤ 64 (overflow
+kept for scoring, never independent); graph edges/node ≤ 8; sequences
+≤ 8/cluster, length ≤ 4; candidates ≤ 200 (`candidates_capped`);
+processing budget 30 s wall (checked BETWEEN clusters —
+`status="budget_exceeded"`, `clusters_unprocessed` counted; what was
+analyzed stays valid). Correlation/graph are sweep-line single passes —
+no unbounded all-pairs, no unbounded in-memory timelines.
+
+**Configuration** (`WORKER_MULTIMODAL_*`, all validated at startup; see
+`worker/README.md` for the full table): enable/disable, correlation
+window, decay τ, same-kind merge gap, confidence threshold, min
+independent modalities, strong-audio-only threshold, boundary padding,
+single-source floor, and every hard budget above.
+
+**Persistence**: nested JSON only — the provenance rides inside the
+clip's existing `evidence` jsonb (size-bounded to ≤ 8 KiB per clip);
+the engine summary is job-level metadata. **No schema change, no
+migration.** No large internal graphs are exposed to ordinary frontend
+endpoints (the clip evidence carries the bounded provenance record only).
+
+**Known limitations**: heuristic confidence is NOT calibrated (see
+terminology above); patterns are conservative candidate
+interpretations, not verified game state; the contradiction rule set is
+deliberately minimal (one explicit rule); the wall budget check
+introduces machine-speed-dependent truncation in extreme cases (the
+report stays honest); synthetic-fixture tests only — no real-world
+accuracy claims.

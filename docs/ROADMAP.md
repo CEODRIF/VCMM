@@ -308,7 +308,16 @@ design: [`docs/stream-intelligence.md`](stream-intelligence.md).
   (pre 4 s / post 8 s), silence-gap boundary snap (speech-safe), merge +
   IoU-0.5 near-duplicate removal, 60–180 s product bounds, 8 heuristic
   categories (always labeled heuristic) + `unclassified`, ranked by
-  (score, confidence, start).
+  (score, confidence, start). **Advanced multimodal fusion** is
+  implemented in TASK 010 (Phase 8) as an OPTIONAL engine layer over
+  this fusion: deterministic sweep-line temporal correlation with
+  evidence independence (repeated OCR/landmarks/same-family signals never
+  count as independent modalities), bounded event graph + sequences, five
+  conservative cross-modal patterns, bounded explainable
+  `heuristic_confidence` (NOT a calibrated probability until an
+  annotated real-VOD evaluation exists — TASK 013), size-bounded
+  per-candidate provenance, enforced budgets, and byte-identical Phase 7
+  behavior when disabled (`docs/stream-intelligence.md` §15).
 - **Rendering**: source-preserved frame rate — the measured source rate is
   rendered exactly (23.976/24/30/55/59.94/60 all preserved; fractional
   NTSC passed to `-r` unrounded), capped at 60 (no frame duplication, no
