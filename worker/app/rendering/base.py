@@ -1,8 +1,14 @@
 """Rendering abstraction.
 
 Phase 1 fixes the output spec (vertical 9:16, 1080x1920) and the renderer
-contract. The FFmpeg implementation (crop/reframe + animated subtitle burn-in)
-arrives in Phase 5. No video is rendered in this phase.
+contract. Phase 5 implements the FFmpeg foundation: cut + reframe to the
+fixed vertical profile (crop/pad, rotation-corrected, no distortion) with
+output validation. Animated subtitle burn-in arrives later (Phase 5b) and is
+NOT part of this foundation — ``spec.captions`` is carried for the future
+but ignored by the current renderer.
+
+The contract is ASYNC: rendering shells out to FFmpeg subprocesses that are
+managed (timeout/cancel/cleanup) inside the event loop.
 """
 
 from __future__ import annotations
@@ -26,7 +32,7 @@ class BaseRenderer(ABC):
     """Interface for clip rendering backends."""
 
     @abstractmethod
-    def render(
+    async def render(
         self,
         source_path: str,
         start: float,
@@ -34,5 +40,9 @@ class BaseRenderer(ABC):
         spec: RenderSpec,
         output_path: str,
     ) -> str:
-        """Cut and re-render a vertical clip; return the output path."""
+        """Cut and re-render a vertical clip; return the output path.
+
+        Raises a rendering error (with a safe category/message) when the
+        clip cannot be produced. The output file is removed on failure.
+        """
         raise NotImplementedError

@@ -26,6 +26,11 @@ WORKER_MODULES = [
     "app.ai.clip_detection",
     "app.ai.scoring",
     "app.rendering.base",
+    "app.rendering.profiles",
+    "app.rendering.ffmpeg",
+    "app.rendering.validation",
+    "app.rendering.renderer",
+    "app.processors.rendering",
     "app.worker",
 ]
 

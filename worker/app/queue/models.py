@@ -58,6 +58,11 @@ ERROR_TRANSCRIPTION_UNAVAILABLE = "transcription_unavailable"
 ERROR_NO_SPEECH = "no_speech"
 ERROR_NO_CLIPS = "no_clips_detected"
 ERROR_CLIPS_PERSIST = "clips_persistence_failed"
+# Phase 5 (rendering):
+ERROR_RENDER_FAILED = "render_failed"
+ERROR_RENDER_INVALID = "render_invalid"
+ERROR_CLIP_UPLOAD = "clip_upload_failed"
+ERROR_NO_CLIPS_TO_RENDER = "no_clips_to_render"
 ERROR_UNKNOWN = "unknown"
 
 #: Categories that must never be retried (the input cannot change, or the
@@ -74,5 +79,7 @@ PERMANENT_ERROR_CATEGORIES = frozenset(
         ERROR_TRANSCRIPTION_UNAVAILABLE,
         ERROR_NO_SPEECH,
         ERROR_NO_CLIPS,
+        ERROR_RENDER_INVALID,
+        ERROR_NO_CLIPS_TO_RENDER,
     }
 )

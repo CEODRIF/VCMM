@@ -130,6 +130,18 @@ def test_complete_job_ingestion_sends_metadata():
     }
 
 
+def test_complete_job_rendering_maps_parameters_and_coerces_boolean():
+    """Phase 5: the ONLY terminal-completion path — the DB guard lives in
+    the RPC; the client just maps parameters and coerces the boolean."""
+    client = FakeClient(responses={"complete_job_rendering": True})
+    queue = SupabaseQueue(client)
+    assert run(queue.complete_job_rendering("j1", "w1")) is True
+    assert client.calls == [("complete_job_rendering", {"p_job_id": "j1", "p_worker_id": "w1"})]
+
+    refused = SupabaseQueue(FakeClient(responses={"complete_job_rendering": False}))
+    assert run(refused.complete_job_rendering("j1", "w1")) is False
+
+
 def test_fail_job_defaults_to_non_permanent_and_returns_new_status():
     client = FakeClient(responses={"fail_job": "queued"})
     queue = SupabaseQueue(client)

@@ -3,9 +3,11 @@
 All queue-control operations go through the restricted, security-definer RPCs
 created in migration 20261115000000 (``claim_next_job``, ``renew_job_lease``,
 ``update_job_progress``, ``complete_job_ingestion``, ``fail_job``,
-``release_job``). Those RPCs are revocable-from-PUBLIC and granted only to
-``service_role``; every update is scoped to the claimed job and lease inside
-the database, so two workers can never own the same active job.
+``release_job``) and extended in Phase 5 (``complete_job_rendering``, the
+only terminal-completion path during rendering). Those RPCs are
+revocable-from-PUBLIC and granted only to ``service_role``; every update is
+scoped to the claimed job and lease inside the database, so two workers can
+never own the same active job.
 """
 
 from __future__ import annotations
@@ -68,6 +70,15 @@ class SupabaseQueue:
 
     async def release_job(self, job_id: str, worker_id: str) -> bool:
         return bool(await self._rpc("release_job", {"p_job_id": job_id, "p_worker_id": worker_id}))
+
+    async def complete_job_rendering(self, job_id: str, worker_id: str) -> bool:
+        """Phase 5 terminal completion — the ONLY path to ``completed``.
+
+        The DB refuses (returns False) unless the caller owns the job, it is
+        in ``rendering``, and EVERY clip is ``ready`` WITH a ``storage_path``
+        — a stale or buggy worker can never mark a job completed early.
+        """
+        return bool(await self._rpc("complete_job_rendering", {"p_job_id": job_id, "p_worker_id": worker_id}))
 
     # -- Phase 4: guarded direct updates (no RPC needed) -----------------------
     # These use the service-role REST client directly. Ownership is enforced

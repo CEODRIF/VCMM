@@ -98,6 +98,9 @@ beforeAll(async () => {
     "20261114000000_phase2_job_settings_and_session_lookup.sql",
     "20261115000000_phase3_queue_and_ingestion.sql",
     "20261116000000_phase4_clip_analysis.sql",
+    // Phase 5 is additive: the Phase 3 queue contract must hold on the
+    // final schema too (regression check).
+    "20261117000000_phase5_rendering.sql",
   ]) {
     await db.exec(readFileSync(join(migrationsDir, file), "utf-8"));
   }

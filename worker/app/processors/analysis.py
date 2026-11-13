@@ -9,15 +9,16 @@ The lifecycle:
 
 Phase 4 FINISHES with the job parked at ``analyzing``: the lock is cleared,
 progress is 100, and the detected clips are in ``public.clips``. The job is
-then NOT claimable — it is picked up by the Phase 5 renderer, which will
-extend the claim to parked ``analyzing`` jobs and move them to ``rendering``.
+then NOT claimable as analysis — the Phase 5A claim re-enters parked
+``analyzing`` jobs (render budget available) and moves them to ``rendering``.
 The worker NEVER marks a job ``completed`` in this phase.
 
-INTEGRATION POINT (Phase 5 rendering):
-    - ``claim_next_job`` must also claim ``analyzing`` jobs whose lock is
-      CLEARED (parked) and transition them to ``rendering``;
-    - the renderer consumes ``clips`` rows (start/end already set) for the
-      job and marks the job ``completed`` when every clip is rendered.
+DELIVERED in Phase 5A (this branch):
+    - ``claim_next_job`` claims PARKED ``analyzing`` jobs (render budget
+      available) and transitions them to ``rendering``;
+    - the renderer consumes the job's ``clips`` rows (start/end already set)
+      and the job becomes ``completed`` ONLY via ``complete_job_rendering``
+      when every clip is ready with a storage path.
 
 Safety: same lease/ownership contract as ingestion — a renewal task keeps
 the lease alive, ownership loss aborts the job without state writes,
