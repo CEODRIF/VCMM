@@ -1,107 +1,65 @@
 import type { Metadata } from "next";
-import { FileArchive, Info } from "lucide-react";
+import Link from "next/link";
+import { Film } from "lucide-react";
 
-import { ClipCard } from "@/components/results/clip-card";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import type { Clip } from "@/types";
+import { ResultsPanel } from "@/components/results/results-panel";
+import { Card, CardContent } from "@/components/ui/card";
 
 export const metadata: Metadata = {
   title: "Results",
   description: "Your generated clips.",
 };
 
-// DEVELOPMENT PLACEHOLDER DATA — typed sample clips for the results layout.
-// The results API and clip storage arrive in Phase 6; nothing here is real.
-const PLACEHOLDER_CLIPS: Clip[] = [
-  {
-    id: "dev-clip-1",
-    jobId: "dev-0001",
-    title: "The opening hook",
-    startTime: 32,
-    endTime: 92,
-    duration: 60,
-    sortOrder: 0,
-    status: "ready",
-  },
-  {
-    id: "dev-clip-2",
-    jobId: "dev-0001",
-    title: "The key insight",
-    startTime: 540,
-    endTime: 630,
-    duration: 90,
-    sortOrder: 1,
-    status: "ready",
-  },
-  {
-    id: "dev-clip-3",
-    jobId: "dev-0001",
-    title: "The payoff moment",
-    startTime: 1180,
-    endTime: 1270,
-    duration: 90,
-    sortOrder: 2,
-    status: "ready",
-  },
-  {
-    id: "dev-clip-4",
-    jobId: "dev-0001",
-    title: "The closing call to action",
-    startTime: 1820,
-    endTime: 1900,
-    duration: 80,
-    sortOrder: 3,
-    status: "ready",
-  },
-];
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export default function ResultsPage() {
+/**
+ * Results page (Phase 6 — live).
+ *
+ * `/results?job=<uuid>` shows the session's own job results (the server
+ * re-verifies ownership on every request). Without a valid job id the page
+ * explains where results come from instead of showing stale placeholder
+ * data.
+ */
+export default function ResultsPage({
+  searchParams,
+}: {
+  searchParams: { job?: string };
+}) {
+  const jobId =
+    typeof searchParams.job === "string" && UUID_PATTERN.test(searchParams.job)
+      ? searchParams.job
+      : null;
+
   return (
     <div className="container py-12">
-      <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Results</h1>
-          <p className="mt-2 text-muted-foreground">
-            Preview and download your generated clips.
-          </p>
-        </div>
-        {/* NONFUNCTIONAL: ZIP packaging does not exist yet (Phase 6). */}
-        <Button disabled aria-disabled="true" title="ZIP downloads arrive in Phase 6">
-          <FileArchive size={16} /> Download all (ZIP)
-        </Button>
-      </div>
-
-      <div className="mb-6 flex items-start gap-3 rounded-md border border-primary/30 bg-primary/10 p-3 text-sm text-accent-foreground" role="status">
-        <Info size={16} className="mt-0.5 shrink-0 text-primary" />
-        <p>
-          Placeholder results for layout development. Clip generation, previews and downloads are
-          not connected yet — see docs/ROADMAP.md (Phases 4-6).
+      <div className="mb-8">
+        <h1 className="text-3xl font-bold tracking-tight">Results</h1>
+        <p className="mt-2 text-muted-foreground">
+          {jobId
+            ? "Preview and download your generated clips."
+            : "Your clips will appear here once a job completes."}
         </p>
       </div>
 
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-        {PLACEHOLDER_CLIPS.map((clip, index) => (
-          <ClipCard key={clip.id} clip={clip} index={index} />
-        ))}
-      </div>
-
-      <Card className="card-surface mt-10">
-        <CardHeader>
-          <CardTitle className="text-base">What lands next</CardTitle>
-          <CardDescription>
-            The results page becomes live once jobs complete in the worker.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="text-sm text-muted-foreground">
-          <ul className="list-disc space-y-1 pl-5">
-            <li>Clip previews served from worker storage (Phase 5-6).</li>
-            <li>Individual MP4 downloads and batch ZIP export (Phase 6).</li>
-            <li>Automatic cleanup of expired jobs and clips (Phase 6).</li>
-          </ul>
-        </CardContent>
-      </Card>
+      {jobId ? (
+        <ResultsPanel jobId={jobId} />
+      ) : (
+        <Card className="card-surface">
+          <CardContent className="flex flex-col items-center gap-4 py-12 text-center">
+            <Film size={28} className="text-muted-foreground" aria-hidden />
+            <p className="max-w-md text-sm text-muted-foreground">
+              When a video job finishes, open its results from the processing
+              page to preview and download the clips.
+            </p>
+            <Link
+              href="/"
+              className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow transition-colors hover:bg-primary/90"
+            >
+              Create your first video
+            </Link>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

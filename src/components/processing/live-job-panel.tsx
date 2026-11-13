@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { Loader2, RefreshCw } from "lucide-react";
+import { Film, Loader2, RefreshCw } from "lucide-react";
 
 import { ProcessingPanel } from "@/components/processing/processing-panel";
 import { Card, CardContent } from "@/components/ui/card";
@@ -157,5 +157,17 @@ export function LiveJobPanel({ jobId }: { jobId: string }) {
     );
   }
 
-  return <ProcessingPanel job={job} live />;
+  return (
+    <div className="space-y-4">
+      {job.status === "completed" && (
+        <Link
+          href={`/results?job=${job.id}`}
+          className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow transition-colors hover:bg-primary/90"
+        >
+          <Film size={16} aria-hidden /> View your clips
+        </Link>
+      )}
+      <ProcessingPanel job={job} live />
+    </div>
+  );
 }
