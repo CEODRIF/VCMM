@@ -18,9 +18,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 #: The signal families the foundation measures. facecam (TASK 008) is a
-#: real detector (MediaPipe Tasks, CPU); gameplay OCR remains unimplemented
-#: — an unimplemented family simply never contributes evidence.
-SIGNAL_FAMILIES = ("audio", "visual", "facecam")
+#: real detector (MediaPipe Tasks, CPU); game vision (TASK 009) is local
+#: OCR (tesseract) of kill-feed/scoreboard regions — both are OPTIONAL
+#: modalities: an unimplemented/disabled family simply never contributes
+#: evidence.
+SIGNAL_FAMILIES = ("audio", "visual", "facecam", "game_vision")
 
 # audio kinds
 KIND_ENERGY_SPIKE = "energy_spike"          # sudden vocal-energy rise
@@ -36,6 +38,13 @@ KIND_FACE_MOUTH_BURST = "face_mouth_burst"          # sudden mouth-opening ratio
 KIND_FACE_SMILE_GEOMETRY = "face_smile_geometry"    # sustained smile-like geometry
 KIND_FACE_HEAD_MOTION = "face_head_motion"          # sudden head rotation delta
 KIND_FACE_BROW_ACTIVITY = "face_brow_activity"      # brow/upper-face lift vs median
+# game-vision kinds (TASK 009) — OCR-observed text/events. The OBSERVED
+# text/values are measured; the higher-level interpretation (kill,
+# result...) is heuristic and flagged as such in each event's evidence.
+KIND_GF_KILL_FEED_ENTRY = "kill_feed_entry"            # new transient text in kill-feed region
+KIND_GF_SCOREBOARD_APPEARANCE = "scoreboard_appearance"  # scoreboard likely visible (heuristic)
+KIND_GF_SCORE_CHANGE = "score_change"                  # OCR-observed value changed
+KIND_GF_MATCH_RESULT_TEXT = "match_result_text"        # generic result text observed (heuristic read)
 
 
 @dataclass(frozen=True)

@@ -56,6 +56,15 @@ from .facecam import (
     summarize_facecam,
     unavailable_report,
 )
+from .game_vision import (
+    GameVisionAnalyzer,
+    GameVisionCancelled,
+    GameVisionChunkReport,
+    GameVisionConfig,
+    detect_game_vision_events,
+    summarize_game_vision,
+)
+from .game_vision.ocr import OcrError
 from .fusion import FusionConfig, fuse
 from .selection import SelectedClip, SelectionConfig, select_clips
 from .signals import SignalEvent
@@ -87,6 +96,9 @@ class PipelineConfig:
     #: TASK 008: facecam modality config (None = disabled → the pipeline
     #: behaves EXACTLY as before, zero overhead, zero behavioral change).
     facecam: FacecamConfig | None = None
+    #: TASK 009: game vision modality config (None = disabled → same
+    #: guarantee as facecam: zero overhead, zero behavioral change).
+    game_vision: GameVisionConfig | None = None
 
     def __post_init__(self) -> None:
         if self.overlap_seconds < 0 or self.overlap_seconds >= self.chunk_seconds:
@@ -108,6 +120,10 @@ class PipelineResult:
     #: — {} when facecam was disabled, {"available": False, "reason": ...}
     #: when it was configured but unavailable (never fabricated).
     facecam: dict[str, Any] = field(default_factory=dict)
+    #: TASK 009: job-level game-vision metadata (engine, measured event
+    #: counts, processing time) — {} when disabled, {"available": False,
+    #: "reason": ...} when configured but unavailable (never fabricated).
+    game_vision: dict[str, Any] = field(default_factory=dict)
 
 
 class StreamIntelPipeline:
@@ -119,6 +135,7 @@ class StreamIntelPipeline:
         store: IntelStore,
         config: PipelineConfig,
         facecam_analyzer: FacecamAnalyzer | None = None,
+        game_vision_analyzer: GameVisionAnalyzer | None = None,
     ) -> None:
         self._ffmpeg = ffmpeg_path
         self._store = store
@@ -126,6 +143,9 @@ class StreamIntelPipeline:
         #: TASK 008: optional facecam analyzer (per-job; None or not
         #: available → the pipeline is byte-for-byte the Phase 7 behavior).
         self._facecam = facecam_analyzer
+        #: TASK 009: optional game-vision analyzer (per-job; same
+        #: guarantee — disabled/None → zero overhead, zero change).
+        self._game_vision = game_vision_analyzer
 
     async def run(
         self,
@@ -135,18 +155,21 @@ class StreamIntelPipeline:
         temp_dir: Path,
         should_stop: Optional[Callable[[], bool]] = None,
     ) -> PipelineResult:
-        """Runs (or resumes) the analysis. Owns the facecam analyzer's
-        lifecycle: the native model is closed on EVERY exit path
-        (complete, incomplete, cancelled, error) — TASK 008."""
+        """Runs (or resumes) the analysis. Owns the optional analyzers'
+        lifecycle: facecam (TASK 008) and game vision (TASK 009) resources
+        are closed on EVERY exit path (complete, incomplete, cancelled,
+        error)."""
         try:
             return await self._run_impl(job_id, source_path, total_duration,
                                         temp_dir, should_stop)
         finally:
-            if self._facecam is not None:
-                try:
-                    await self._facecam.close()
-                except Exception:  # noqa: BLE001 — teardown best-effort
-                    logger.debug("facecam analyzer close raised", exc_info=True)
+            for _analyzer, _label in ((self._facecam, "facecam"),
+                                      (self._game_vision, "game vision")):
+                if _analyzer is not None:
+                    try:
+                        await _analyzer.close()
+                    except Exception:  # noqa: BLE001 — teardown best-effort
+                        logger.debug("%s analyzer close raised", _label, exc_info=True)
 
     async def _run_impl(
         self,
@@ -223,6 +246,51 @@ class StreamIntelPipeline:
                         self._facecam.unavailable_reason or "facecam unavailable",
                     ).storage_summary()
 
+            # TASK 009: optional game-vision pass — same contract as
+            # facecam: an UNAVAILABLE game vision changes NOTHING about the
+            # chunk outcome; events enter raw_events BEFORE ownership so
+            # the existing midpoint/dedup semantics apply unchanged.
+            game_vision_summary = None
+            if cfg.game_vision is not None and self._game_vision is not None:
+                if self._game_vision.available:
+                    gv_dir = temp_dir / f"gamevision-chunk-{span.index:04d}"
+                    try:
+                        gv_report: GameVisionChunkReport = await \
+                            self._game_vision.analyze_chunk(
+                                self._ffmpeg, source_path, span.start,
+                                span.duration, gv_dir, should_stop,
+                            )
+                    except GameVisionCancelled:
+                        raise PipelineCancelled()
+                    except OcrError as exc:
+                        logger.warning("job %s: game vision chunk %d ocr failed (%s); continuing without it",
+                                       job_id, span.index, exc)
+                        gv_report = GameVisionChunkReport(
+                            offset=span.start, duration=span.duration, available=False,
+                            unavailable_reason=str(exc),
+                            sample_fps=cfg.game_vision.sample_fps)
+                    except Exception as exc:  # noqa: BLE001 — optional modality boundary
+                        logger.warning("job %s: game vision chunk %d failed (%s); continuing without it",
+                                       job_id, span.index, exc.__class__.__name__)
+                        gv_report = GameVisionChunkReport(
+                            offset=span.start, duration=span.duration, available=False,
+                            unavailable_reason=f"unexpected: {exc.__class__.__name__}",
+                            sample_fps=cfg.game_vision.sample_fps)
+                    game_vision_summary = gv_report.storage_summary()
+                    if gv_report.available:
+                        raw_events = raw_events + detect_game_vision_events(
+                            gv_report.candidates, cfg.game_vision, span.start,
+                            engine_name=gv_report.engine,
+                            engine_version=gv_report.engine_version,
+                        )
+                else:
+                    game_vision_summary = GameVisionChunkReport(
+                        offset=span.start, duration=span.duration, available=False,
+                        unavailable_reason=(self._game_vision.unavailable_reason
+                                            or "game vision unavailable"),
+                        sample_fps=cfg.game_vision.sample_fps,
+                    ).storage_summary()
+
             lower, upper = bounds[span.index]
             owned = [e for e in raw_events if lower <= e.t < upper]
 
@@ -234,6 +302,8 @@ class StreamIntelPipeline:
             }
             if facecam_summary is not None:
                 summary["facecam"] = facecam_summary  # nested: no key collision
+            if game_vision_summary is not None:
+                summary["game_vision"] = game_vision_summary  # nested: no key collision
             await self._store.upsert_events(job_id, owned)
             await self._store.mark_chunk_done(job_id, span.index, span.start, span.end, summary)
             new_summaries[span.index] = summary
@@ -264,6 +334,7 @@ class StreamIntelPipeline:
         silence_gaps: list[tuple[float, float]] = []
         summaries: list[dict[str, Any]] = []
         facecam_summaries: list[dict[str, Any]] = []
+        game_vision_summaries: list[dict[str, Any]] = []
         for row in all_summaries.values():
             feats = row.get("features") or {}
             summaries.append(feats)
@@ -271,6 +342,8 @@ class StreamIntelPipeline:
                 silence_gaps.append((float(gap[0]), float(gap[1])))
             if "facecam" in feats:
                 facecam_summaries.append(feats["facecam"])
+            if "game_vision" in feats:
+                game_vision_summaries.append(feats["game_vision"])
         silence_gaps.sort()
         candidates = select_clips(
             windows,
@@ -283,6 +356,10 @@ class StreamIntelPipeline:
             summarize_facecam(facecam_summaries)
             if cfg.facecam is not None and facecam_summaries else {}
         )
+        game_vision_meta = (
+            summarize_game_vision(game_vision_summaries)
+            if cfg.game_vision is not None and game_vision_summaries else {}
+        )
         return PipelineResult(
             status="complete",
             total_chunks=len(spans),
@@ -292,4 +369,5 @@ class StreamIntelPipeline:
             candidates=candidates,
             features_summaries=summaries,
             facecam=facecam_meta,
+            game_vision=game_vision_meta,
         )

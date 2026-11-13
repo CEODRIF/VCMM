@@ -1,0 +1,20 @@
+# TASK 009 — Game Vision Intelligence: OPTIONAL extra.
+#
+# NOT installed by the base requirements.txt — the worker runs the full
+# Phase 7 pipeline (plus TASK 008 facecam) without it. Install only when
+# WORKER_GAME_VISION_ENABLED=true:
+#
+#     pip install -r requirements-game-vision.txt
+#     # AND the system OCR engine (Debian/Ubuntu; the engine is a system
+#     # package, NOT a pip dependency — no cloud OCR, no paid API):
+#     sudo apt-get install tesseract-ocr tesseract-ocr-eng
+#
+# Local CPU inference only. The tesseract BINARY and its language packs
+# (tessdata) are explicitly configured (WORKER_GAME_VISION_TESSERACT_BINARY
+# / WORKER_GAME_VISION_TESSDATA_DIR) and validated at first use — NEVER
+# downloaded during job execution. A missing binary/tessdata degrades to
+# an honest "unavailable" result (recorded, no events, no crash).
+#
+# Pillow: image handling for the HUD change metric + test fixtures
+# (small wheel, MIT license).
+Pillow==13.0.0

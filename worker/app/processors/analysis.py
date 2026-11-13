@@ -39,6 +39,7 @@ from ..config.settings import Settings
 from ..intel.audio_features import AudioFeatureError
 from ..intel.checkpoints import IntelStore, IntelStoreError
 from ..intel.facecam import FacecamConfig, build_facecam_analyzer
+from ..intel.game_vision import build_game_vision_analyzer
 from ..intel.pipeline import PipelineCancelled, PipelineConfig, PipelineError, StreamIntelPipeline
 from ..intel.selection import SelectedClip
 from ..intel.visual_features import VisualFeatureError
@@ -348,6 +349,19 @@ class AnalysisProcessor:
             )
             facecam_analyzer = build_facecam_analyzer(self._settings)
 
+        # TASK 009: game-vision modality (optional). Disabled → Null
+        # analyzer (config None) → the pipeline is exactly as before.
+        # Enabled → per-job analyzer; the tesseract engine is validated
+        # lazily on the first chunk — a missing binary/tessdata degrades
+        # to an honest "unavailable" (recorded, no events, no crash).
+        # The analyzer is the single source of truth for the validated
+        # config (mirrored into PipelineConfig — no double construction).
+        game_vision_config = None
+        game_vision_analyzer = None
+        if self._settings.game_vision_enabled:
+            game_vision_analyzer = build_game_vision_analyzer(self._settings)
+            game_vision_config = getattr(game_vision_analyzer, "config", None)
+
         # Per-job pipeline: the chunk/overlap/budget come from the settings
         # (operational limits); the clip cap honours the JOB's request.
         config = PipelineConfig(
@@ -359,10 +373,12 @@ class AnalysisProcessor:
             scene_threshold=self._settings.intel_scene_threshold,
             requested_clips=int(job.get("requested_clips") or self._settings.intel_requested_clips),
             facecam=facecam_config,
+            game_vision=game_vision_config,
         )
         pipeline = StreamIntelPipeline(
             self._settings.ffmpeg_path, self._intel_store, config,
             facecam_analyzer=facecam_analyzer,
+            game_vision_analyzer=game_vision_analyzer,
         )
         try:
             result = await pipeline.run(job_id, destination, info.duration_seconds, tmp_dir)
