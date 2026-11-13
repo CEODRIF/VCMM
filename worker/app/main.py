@@ -1,13 +1,14 @@
 """ClipForge AI worker — application entrypoint.
 
-Phase 1 exposes only the health endpoint. Queue consumption, video
-processing and storage integration arrive in later phases
-(see docs/ROADMAP.md).
+Phase 3: serves the health/heartbeat API and runs the ingestion worker loop
+(claim → download → FFprobe validation → ready) alongside it via FastAPI
+lifespan. Video processing runs ONLY in this worker, never on Vercel.
 """
 
 from __future__ import annotations
 
 import time
+from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI
@@ -17,15 +18,55 @@ from .config.logging import configure_logging
 from .config.settings import Settings, get_settings
 
 
+def build_worker(settings: Settings):
+    """Constructs the ingestion worker (or None when Supabase is not configured)."""
+    if not (settings.worker_enabled and settings.supabase_configured):
+        return None
+    from supabase import create_async_client
+
+    from .queue.supabase_queue import SupabaseQueue
+    from .storage.supabase_storage import SupabaseStorage
+    from .worker import IngestionWorker
+
+    client = create_async_client(settings.supabase_url, settings.supabase_service_role_key)
+    queue = SupabaseQueue(client)
+    storage = SupabaseStorage(client, settings.max_upload_size_bytes)
+    return IngestionWorker(settings, queue, storage)
+
+
 def create_app(settings: Optional[Settings] = None) -> FastAPI:
     """Application factory (explicit settings allow isolated tests)."""
     settings = settings or get_settings()
     configure_logging(settings.log_level)
 
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        worker = None
+        try:
+            worker = build_worker(settings)
+        except Exception as exc:  # noqa: BLE001 — never take down the API
+            import logging
+
+            logging.getLogger("clipforge").error("worker init failed: %s", exc.__class__.__name__)
+            worker = None
+        app.state.worker = worker
+        if worker is not None:
+            await worker.start()
+        else:
+            import logging
+
+            logging.getLogger("clipforge").info(
+                "ingestion worker not started (disabled or Supabase not configured)"
+            )
+        yield
+        if worker is not None:
+            await worker.stop()
+
     app = FastAPI(
         title="ClipForge AI Worker",
         version=settings.version,
-        description="Video processing worker for ClipForge AI (Phase 1: health endpoint only).",
+        description="Video processing worker for ClipForge AI (Phase 3: ingestion queue + validation).",
+        lifespan=lifespan,
     )
     app.state.settings = settings
     app.state.started_at = time.monotonic()

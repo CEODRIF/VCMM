@@ -8,7 +8,12 @@ import { ProcessingPanel } from "@/components/processing/processing-panel";
 import { Card, CardContent } from "@/components/ui/card";
 import type { Job } from "@/types";
 
-const TERMINAL_STATES: ReadonlySet<Job["status"]> = new Set(["completed", "failed"]);
+/**
+ * States where polling stops: completed/failed are final, and 'ready' is
+ * terminal FOR INGESTION (Phase 3) — the product pipeline continues in
+ * Phase 4, so we do not burn polls on a job that will not change.
+ */
+const POLL_STOP_STATES: ReadonlySet<Job["status"]> = new Set(["ready", "completed", "failed"]);
 const POLL_INTERVAL_MS = 2500;
 
 interface PublicJob {
@@ -21,6 +26,7 @@ interface PublicJob {
   progress: number;
   createdAt: string;
   completedAt?: string;
+  enqueuedAt?: string | null;
   errorMessage?: string;
 }
 
@@ -69,16 +75,18 @@ export function LiveJobPanel({ jobId }: { jobId: string }) {
           id: publicJob.id,
           sourceType: publicJob.sourceType,
           requestedClips: publicJob.requestedClips,
+          clipDurationSeconds: publicJob.clipDurationSeconds,
           status: publicJob.status,
           progress: publicJob.progress,
           createdAt: publicJob.createdAt,
           completedAt: publicJob.completedAt,
+          enqueuedAt: publicJob.enqueuedAt ?? undefined,
           errorMessage: publicJob.errorMessage,
         };
         setJob(mapped);
         setLoading(false);
 
-        if (!TERMINAL_STATES.has(mapped.status)) {
+        if (!POLL_STOP_STATES.has(mapped.status)) {
           timer = setTimeout(fetchOnce, POLL_INTERVAL_MS);
         }
       } catch {

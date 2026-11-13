@@ -38,15 +38,46 @@ Seven phases, in order. Each phase ends with a shippable increment.
 - Test suites: auth API, session security, rate limiter, jobs API
   authorization, database/RLS.
 
-## Phase 3 — Ingestion
+## Phase 3 — Ingestion ✅ (this commit)
 
-- YouTube source via an **authorized source provider** (server-side fetch,
-  never in the browser); upload path with size/type validation.
-- Queue backend for jobs (worker consumes `queued` jobs created in Phase 2;
-  state transitions written to `jobs` with progress updates).
-- Storage: per-job layout on local FS, object-storage abstraction behind
-  `worker/app/storage`.
-- Multipart upload transfer (fills the reserved `source_path` from Phase 2).
+- **Real direct uploads**: create job (`uploading`, reserved per-job location)
+  → `POST /api/v1/jobs/[id]/upload/authorize` (session + ownership + state
+  guards, file-name traversal check, extension/MIME whitelist with spoofing
+  cross-check, declared-size cap, rate limit, server-generated object path,
+  signed upload URL, short-lived authorization TTL) → browser PUT **directly**
+  to private Supabase Storage (real progress %, cancellation, retry) →
+  `POST /api/v1/jobs/[id]/upload/complete` (object existence + exact-size
+  verification, idempotent, guarded atomic `uploading → queued`).
+- **Private Supabase Storage** (migration `20261115000001`): `clipforge-sources`
+  and `clipforge-clips`, both private, no client policies, service-role only;
+  no public source-video URLs.
+- **Video validation** (worker, FFprobe on the actual bytes — never the
+  browser's MIME/extension): container whitelist (MP4/MOV/WEBM family), video
+  stream required, audio presence reported, codecs, resolution, duration vs
+  the configured SOURCE limit (`MAX_SOURCE_DURATION_SECONDS`, distinct from
+  the 60-180s clip setting), size vs `MAX_UPLOAD_SIZE_BYTES`, corruption and
+  unsupported-container rejection with safe error categories.
+- **Postgres job queue** (migration `20261115000000`): queue/lease columns,
+  nine-state machine with a DB-level transition trigger, `FOR UPDATE SKIP
+  LOCKED` atomic claiming, expired-lease crash recovery, bounded retries,
+  owner-scoped renew/progress/complete/fail/release RPCs — EXECUTE revoked
+  from PUBLIC, granted to `service_role` only.
+- **Python worker ingestion loop**: poll + claim (bounded concurrency),
+  lease renewal with ownership-loss abort, download to scratch-only temp
+  storage (always cleaned up), progress reporting, exponential backoff on
+  transport errors, graceful shutdown, `/health` heartbeat. Ingestion ends at
+  `ready`; the worker never marks jobs `completed`.
+- **YouTube**: authorized source-provider interface (`src/lib/providers/
+  youtube.ts`). No provider ships with the repo → creation returns a clear
+  503 explaining that direct upload is available. No unauthorized downloader
+  (yt-dlp/cookies/DRM) exists or is added.
+- Tests: upload API (auth, ownership, state, extension, MIME spoofing,
+  oversize, expiry, idempotent completion), queue RPCs + RLS + bucket
+  migration on a real PostgreSQL engine (pglite WASM), FFprobe validation and
+  ingestion lifecycle with synthetic FFmpeg-generated videos (no binary
+  fixtures committed), worker loop (claim, backoff, shutdown).
+- Note: applied to a real Supabase project remains an explicit live step
+  (verified development project required; none was provisioned in this phase).
 
 ## Phase 4 — AI pipeline
 

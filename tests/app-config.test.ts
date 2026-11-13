@@ -27,10 +27,12 @@ describe("application configuration", () => {
     expect(appConfig.output.resolutionLabel).toBe("1080p");
   });
 
-  it("lists all seven processing states in order", () => {
+  it("lists all nine processing states in order (Phase 3 ingestion lifecycle)", () => {
     expect(appConfig.processingStates).toEqual([
-      "queued",
       "uploading",
+      "queued",
+      "validating",
+      "ready",
       "transcribing",
       "analyzing",
       "rendering",

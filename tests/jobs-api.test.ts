@@ -48,7 +48,14 @@ beforeEach(() => {
 });
 
 describe("POST /api/v1/jobs — job creation", () => {
-  const validPayload = {
+  const uploadPayload = {
+    sourceType: "upload",
+    fileName: "my video (final).mp4",
+    clipCount: 3,
+    clipDurationSeconds: 120,
+    captionsEnabled: true,
+  };
+  const youtubePayload = {
     sourceType: "youtube",
     youtubeUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
     clipCount: 3,
@@ -61,7 +68,7 @@ describe("POST /api/v1/jobs — job creation", () => {
       new Request("http://localhost/api/v1/jobs", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(validPayload),
+        body: JSON.stringify(uploadPayload),
       })
     );
     expect(response.status).toBe(401);
@@ -70,12 +77,12 @@ describe("POST /api/v1/jobs — job creation", () => {
 
   it("rejects expired sessions (401)", async () => {
     findSessionMock.mockResolvedValue(null);
-    const response = await POST_JOBS(requestWithSession("POST", "/api/v1/jobs", validPayload));
+    const response = await POST_JOBS(requestWithSession("POST", "/api/v1/jobs", uploadPayload));
     expect(response.status).toBe(401);
   });
 
-  it("creates a job owned by the verified session (201)", async () => {
-    const response = await POST_JOBS(requestWithSession("POST", "/api/v1/jobs", validPayload));
+  it("creates an upload job in the 'uploading' state with a server-reserved path (201)", async () => {
+    const response = await POST_JOBS(requestWithSession("POST", "/api/v1/jobs", uploadPayload));
     expect(response.status).toBe(201);
 
     const body = (await response.json()) as { job: { id: string; status: string } };
@@ -83,7 +90,8 @@ describe("POST /api/v1/jobs — job creation", () => {
     expect(body.job.id).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
     );
-    expect(body.job.status).toBe("queued");
+    // Phase 3: uploads wait for the verified file before entering the queue.
+    expect(body.job.status).toBe("uploading");
 
     expect(insertMock).toHaveBeenCalledTimes(1);
     const call = insertMock.mock.calls[0];
@@ -92,46 +100,41 @@ describe("POST /api/v1/jobs — job creation", () => {
     // The id the DB receives is the same id the client got.
     expect(input.id).toBe(body.job.id);
     expect(input.sessionId).toBe(SESSION_ID);
-    expect(input.sourceType).toBe("youtube");
-    expect(input.sourceUrl).toBe("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    expect(input.sourceType).toBe("upload");
     expect(input.requestedClips).toBe(3);
     expect(input.clipDurationSeconds).toBe(120);
     expect(input.captionsEnabled).toBe(true);
+    expect(input.initialStatus).toBe("uploading");
+    // Reserved location per job — the exact object path is pinned later by
+    // the authorization endpoint (never client-supplied).
+    expect(input.sourcePath).toBe(`sources/${body.job.id}/reserved`);
 
     // No private storage paths in the response.
     expect(JSON.stringify(body)).not.toContain("source_path");
     expect(JSON.stringify(body)).not.toContain("storage");
+    expect(JSON.stringify(body)).not.toContain("sources/");
   });
 
-  it("creates an upload job with a sanitized reserved path (201)", async () => {
-    const response = await POST_JOBS(
-      requestWithSession("POST", "/api/v1/jobs", {
-        sourceType: "upload",
-        fileName: "my video (final).mp4",
-        clipCount: 1,
-        clipDurationSeconds: 60,
-        captionsEnabled: false,
-      })
-    );
-    expect(response.status).toBe(201);
-    const call = insertMock.mock.calls[0];
-    expect(call).toBeDefined();
-    const input = call?.[0] as Record<string, unknown>;
-    // Traversal and path separators are stripped to a safe basename.
-    expect(String(input.sourcePath)).toContain("uploads/my_video_final_.mp4");
-    expect(String(input.sourcePath)).not.toContain("..");
+  it("refuses YouTube jobs with a clear 503 when no authorized provider is configured", async () => {
+    const response = await POST_JOBS(requestWithSession("POST", "/api/v1/jobs", youtubePayload));
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toMatch(/provider is not configured/i);
+    expect(body.error).toMatch(/direct video file upload is available/i);
+    // No job row must be created for an unavailable provider.
+    expect(insertMock).not.toHaveBeenCalled();
   });
 
   it("rejects invalid payloads with 400", async () => {
     const cases: Array<Record<string, unknown>> = [
-      { ...validPayload, clipCount: 0 },
-      { ...validPayload, clipCount: 11 },
-      { ...validPayload, clipDurationSeconds: 59 },
-      { ...validPayload, clipDurationSeconds: 181 },
-      { ...validPayload, clipDurationSeconds: 90.5 },
-      { ...validPayload, youtubeUrl: "https://example.com/video" },
+      { ...uploadPayload, clipCount: 0 },
+      { ...uploadPayload, clipCount: 11 },
+      { ...uploadPayload, clipDurationSeconds: 59 },
+      { ...uploadPayload, clipDurationSeconds: 181 },
+      { ...uploadPayload, clipDurationSeconds: 90.5 },
+      { ...youtubePayload, youtubeUrl: "https://example.com/video" },
       { sourceType: "upload", clipCount: 1, clipDurationSeconds: 60, captionsEnabled: true },
-      { ...validPayload, sourceType: "upload", fileName: "../escape.mp4" },
+      { ...uploadPayload, fileName: "../escape.mp4" },
     ];
     for (const payload of cases) {
       const response = await POST_JOBS(requestWithSession("POST", "/api/v1/jobs", payload));
