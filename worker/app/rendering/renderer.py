@@ -71,8 +71,8 @@ class FFmpegRenderer(BaseRenderer):
         profile: Optional[RenderProfile] = None,
         timeout_seconds: float = 900.0,
         probe_timeout_seconds: float = 60.0,
-        fps_low: int = 30,
-        fps_high: int = 60,
+        fps_low: float = 30,
+        fps_high: float = 60,
         fps_high_source_threshold: float = 55.0,
     ) -> None:
         self._ffmpeg = ffmpeg_path
@@ -80,8 +80,12 @@ class FFmpegRenderer(BaseRenderer):
         self._profile = profile or RenderProfile()
         self._timeout = timeout_seconds
         self._probe_timeout = probe_timeout_seconds
-        # Source-aware frame-rate selection (TASK 007): high-fps sources are
-        # rendered at fps_high instead of being dropped to the profile rate.
+        # Source-preserved frame-rate selection (TASK 007, Priority 4): the
+        # clip renders at the MEASURED source rate (fractional NTSC rates
+        # included), capped at ``fps_high``; ``fps_low`` is only the fallback
+        # when the source rate is unknown. ``fps_high_source_threshold`` is
+        # kept for settings compatibility (legacy two-tier design) and is no
+        # longer used by the selection.
         self._fps_low = fps_low
         self._fps_high = fps_high
         self._fps_high_source_threshold = fps_high_source_threshold
@@ -117,8 +121,11 @@ class FFmpegRenderer(BaseRenderer):
         base_plan = self._profile.video_filter(width, height, cw)
         rotate_filter = _ROTATION_FILTERS[cw]
         filter_chain = f"{rotate_filter},{base_plan}" if rotate_filter else base_plan
-        # Preserve the source rate where practical: 60 fps gameplay stays 60;
-        # slower/unknown sources keep the profile default (no frame dupes).
+        # Preserve the MEASURED source rate (TASK 007, Priority 4): 23.976 /
+        # 24 / 30 / 55 / 59.94 / 60 fps sources each render at their own
+        # rate — the output never exceeds the measured rate, so frames are
+        # never duplicated to fake a higher rate; unknown rates keep the
+        # profile default.
         out_fps = select_output_fps(
             source_fps, self._fps_low, self._fps_high, self._fps_high_source_threshold
         )

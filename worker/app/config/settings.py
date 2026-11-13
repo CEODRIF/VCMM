@@ -87,13 +87,16 @@ class Settings(BaseSettings):
     #: A rendered clip larger than this is a contract violation and is
     #: rejected (not uploaded).
     max_clip_size_bytes: int = Field(default=200 * 1024 * 1024, gt=0)
-    #: Source-aware frame rate (TASK 007): when the source averages at least
-    #: ``render_fps_high_source_threshold`` fps, the clip is rendered at
-    #: ``render_fps_high`` (60) instead of ``render_fps_low`` (30) — high-fps
-    #: gameplay is never dropped to 30. Below the threshold the profile
-    #: default applies (no frame duplication).
+    #: Source-preserved frame rate (TASK 007, Priority 4): the clip is
+    #: rendered at the MEASURED source rate (fractional NTSC rates included,
+    #: e.g. 23.976 / 29.97 / 59.94), capped at ``render_fps_high`` — the
+    #: output never exceeds the measured rate, so frames are never duplicated
+    #: to fake a higher rate. ``render_fps_low`` is the fallback used only
+    #: when the source rate cannot be measured.
     render_fps_low: int = Field(default=30, ge=12, le=60)
     render_fps_high: int = Field(default=60, ge=30, le=120)
+    #: Retained for settings compatibility with the earlier two-tier design;
+    #: the source-preserved selection no longer uses it.
     render_fps_high_source_threshold: float = Field(default=55.0, gt=0, le=120)
 
     # --- Phase 5B: caption style (burned-in animated subtitles) ----------------

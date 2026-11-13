@@ -216,31 +216,51 @@ def test_ffmpeg_video_args_fps_override():
     p = RenderProfile()
     # Default keeps the profile rate...
     assert p.ffmpeg_video_args()[-2:] == ["-r", "30"]
-    # ...and a source-aware override changes only the -r value.
+    # ...and a source-preserved override changes only the -r value.
     assert p.ffmpeg_video_args(60)[-2:] == ["-r", "60"]
     assert p.ffmpeg_video_args(30)[-2:] == ["-r", "30"]
+    # Fractional NTSC rates format exactly — no "30.0" padding and no
+    # silent rounding of 59.94 to 60.
+    assert p.ffmpeg_video_args(59.94)[-2:] == ["-r", "59.94"]
+    assert p.ffmpeg_video_args(23.976)[-2:] == ["-r", "23.976"]
 
 
-# ---- source-aware frame-rate selection (TASK 007) ---------------------------------
+# ---- source-preserved frame-rate selection (TASK 007, Priority 4) ------------------
 
-def test_select_output_fps_preserves_high_fps_sources():
-    # 60 / 59.94 / 55 fps gameplay must render at the HIGH rate, never dropped.
-    assert select_output_fps(60.0) == 60
-    assert select_output_fps(59.94) == 60
-    assert select_output_fps(55.0) == 60
+def test_select_output_fps_preserves_measured_source_rate():
+    # The measured rate passes through UNCLAMPED inside the operating
+    # window — including fractional NTSC rates.
+    assert select_output_fps(23.976) == pytest.approx(23.976)
+    assert select_output_fps(24.0) == pytest.approx(24.0)
+    assert select_output_fps(30.0) == pytest.approx(30.0)
+    assert select_output_fps(55.0) == pytest.approx(55.0)
+    assert select_output_fps(59.94) == pytest.approx(59.94)
+    assert select_output_fps(60.0) == pytest.approx(60.0)
 
 
-def test_select_output_fps_keeps_low_fps_sources_low():
-    # 30 / 24 / 10 fps sources keep the default (no frame duplication).
-    assert select_output_fps(30.0) == 30
-    assert select_output_fps(24.0) == 30
-    assert select_output_fps(10.0) == 30
+def test_select_output_fps_never_upsamples_above_source():
+    # The output rate never exceeds the measured source rate: frames are
+    # never duplicated to fake a higher rate (the old 24 → 30 behavior).
+    for rate in (10.0, 12.0, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0):
+        assert select_output_fps(rate) <= rate + 1e-9
+
+
+def test_select_output_fps_caps_sources_above_the_operating_max():
+    # Out-of-window sources are BOUNDED (an explicit, documented cap) —
+    # in-window sources are never touched.
+    assert select_output_fps(120.0) == pytest.approx(60.0)
+    assert select_output_fps(65.0) == pytest.approx(60.0)
+    assert select_output_fps(70.0, fps_low=25, fps_high=48) == pytest.approx(48.0)
+    assert select_output_fps(45.0, fps_low=25, fps_high=48) == pytest.approx(45.0)
 
 
 def test_select_output_fps_unknown_rate_falls_back_to_low():
-    assert select_output_fps(None) == 30
+    assert select_output_fps(None) == pytest.approx(30.0)
+    assert select_output_fps(None, fps_low=25) == pytest.approx(25.0)
 
 
-def test_select_output_fps_respects_custom_thresholds():
-    assert select_output_fps(45.0, fps_low=25, fps_high=48, high_source_threshold=40.0) == 48
-    assert select_output_fps(30.0, fps_low=25, fps_high=48, high_source_threshold=40.0) == 25
+def test_select_output_fps_legacy_threshold_param_is_harmless():
+    # The legacy two-tier parameter is accepted (settings compatibility)
+    # but no longer changes the selection.
+    assert select_output_fps(24.0, high_source_threshold=40.0) == pytest.approx(24.0)
+    assert select_output_fps(55.0, fps_low=30, fps_high=60, high_source_threshold=55.0) == pytest.approx(55.0)

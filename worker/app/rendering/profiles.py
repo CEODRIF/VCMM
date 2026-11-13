@@ -87,24 +87,44 @@ def plan_video_filter(
 
 def select_output_fps(
     source_fps: float | None,
-    fps_low: int = 30,
-    fps_high: int = 60,
+    fps_low: float = 30.0,
+    fps_high: float = 60.0,
     high_source_threshold: float = 55.0,
-) -> int:
+) -> float:
     """Picks the output frame rate from the MEASURED source rate (TASK 007).
 
-    - source at or above ``high_source_threshold`` (≈60 fps gameplay) →
-      ``fps_high``: high-fps footage is never dropped to 30;
-    - anything lower (or an unknown rate) → ``fps_low``: the legacy default,
-      which never duplicates frames to fake a higher rate.
+    Priority 4: the measured source rate is PRESERVED — fractional NTSC
+    rates included (23.976, 29.97, 59.94):
 
-    Deterministic; the returned value is what ``-r`` is passed, so the
-    rendered clip's fps is always a measured fact (verified by ffprobe in
-    tests), not a claim.
+    - source rate unknown (``None``) → ``fps_low``: the legacy default,
+      used only when the rate cannot be measured;
+    - source rate known → the source rate itself, CAPPED at ``fps_high``:
+      the output never exceeds the measured rate, so frames are never
+      duplicated to fake a higher rate, and every rate inside the
+      operating window (23.976 … 60) passes through unclamped. A source
+      above ``fps_high`` (e.g. 120 fps) is bounded to it — an explicit,
+      documented operational limit, applied only out-of-window.
+
+    ``high_source_threshold`` is accepted for compatibility with the
+    earlier two-tier design and the settings surface; it no longer affects
+    the selection. Deterministic; the returned value is what ``-r`` is
+    passed, so the rendered clip's fps is a measured fact (verified by
+    ffprobe in tests), not a claim.
     """
-    if source_fps is not None and source_fps >= high_source_threshold:
-        return fps_high
-    return fps_low
+    if source_fps is None:
+        return float(fps_low)
+    return min(source_fps, float(fps_high))
+
+
+def format_frame_rate(fps: float) -> str:
+    """Formats a frame rate for FFmpeg's ``-r`` option.
+
+    Integral values render as plain integers (``30.0`` → ``"30"``);
+    fractional NTSC rates keep their exact decimals (``59.94`` →
+    ``"59.94"``, ``23.976`` → ``"23.976"``) — never a padded ``"30.0"``
+    or a rounded ``"60"`` that would silently change the rate.
+    """
+    return f"{round(float(fps), 3):g}"
 
 
 def _even_ceil(x: float) -> int:
@@ -136,16 +156,17 @@ class RenderProfile:
     #: "cover" (center crop, default) or "contain" (black pad).
     fit: str = "cover"
 
-    def ffmpeg_video_args(self, fps: int | None = None) -> list[str]:
-        """Encoder args. ``fps`` overrides the profile default for
-        source-aware rate selection (TASK 007); omitted = profile ``fps``."""
-        effective = self.fps if fps is None else fps
+    def ffmpeg_video_args(self, fps: float | None = None) -> list[str]:
+        """Encoder args. ``fps`` overrides the profile default with the
+        source-preserved rate (TASK 007, Priority 4); omitted = profile
+        ``fps``. Fractional rates are formatted exactly (``59.94``)."""
+        effective = float(self.fps) if fps is None else float(fps)
         return [
             "-c:v", self.video_codec,
             "-preset", self.preset,
             "-crf", str(self.crf),
             "-pix_fmt", self.pix_fmt,
-            "-r", str(effective),
+            "-r", format_frame_rate(effective),
         ]
 
     def ffmpeg_audio_args(self) -> list[str]:
