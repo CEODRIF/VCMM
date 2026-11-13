@@ -29,6 +29,10 @@ from typing import Any
 from .fusion import CandidateWindow
 from .signals import (
     KIND_ENERGY_SPIKE,
+    KIND_FACE_BROW_ACTIVITY,
+    KIND_FACE_HEAD_MOTION,
+    KIND_FACE_MOUTH_BURST,
+    KIND_FACE_SMILE_GEOMETRY,
     KIND_MOTION_BURST,
     KIND_SCENE_CHANGE,
     KIND_TRANSIENT,
@@ -121,14 +125,29 @@ def _snap_to_silence(boundary: float, direction: int, gaps: list[tuple[float, fl
 
 
 def _categorize(window: CandidateWindow) -> tuple[str, str]:
-    """HEURISTIC label from the strongest evidence. Returns (category, why)."""
+    """HEURISTIC label from the strongest evidence. Returns (category, why).
+
+    Facecam kinds (TASK 008) contribute only as HEURISTIC visual-pattern
+    evidence — the "why" strings say exactly that. Facecam evidence never
+    overrides stronger audio/visual structures below it; it refines them.
+    """
     kinds = {e.kind for e in window.events}
     families = set(window.families)
     vocal = {KIND_ENERGY_SPIKE, KIND_VOICE_ACTIVITY_CHANGE} & kinds
     sfx = kinds & {KIND_TRANSIENT}
     scene = window.family_strengths.get("visual", 0.0) if "visual" in families else 0.0
     has_scene = KIND_SCENE_CHANGE in kinds
+    has_smile = KIND_FACE_SMILE_GEOMETRY in kinds
+    has_mouth_burst = KIND_FACE_MOUTH_BURST in kinds
 
+    if vocal and has_smile:
+        return (CATEGORY_FUNNY,
+                "vocal activity co-occurring with sustained smile-like facecam geometry "
+                "(heuristic visual pattern)")
+    if vocal and has_mouth_burst:
+        return (CATEGORY_CRAZY_REACTION,
+                "vocal spike co-occurring with a measured mouth-opening burst on the facecam "
+                "(heuristic visual pattern)")
     if vocal and len(kinds & (vocal | sfx)) >= 2:
         return CATEGORY_CRAZY_REACTION, "sustained vocal spike co-occurring with a transient burst"
     if vocal and has_scene:
@@ -143,6 +162,14 @@ def _categorize(window: CandidateWindow) -> tuple[str, str]:
         return CATEGORY_UNEXPECTED, "measured scene change (heuristic)"
     if KIND_MOTION_BURST in kinds:
         return CATEGORY_CLUTCH, "sudden visual motion surge (heuristic)"
+    if has_smile and len(families) >= 2:
+        return (CATEGORY_FUNNY,
+                "sustained smile-like facecam geometry with other-family evidence "
+                "(heuristic visual pattern)")
+    if has_mouth_burst or KIND_FACE_BROW_ACTIVITY in kinds or KIND_FACE_HEAD_MOTION in kinds:
+        return (CATEGORY_UNCLASSIFIED,
+                "facecam facial-activity pattern without corroborating evidence "
+                "(heuristic visual pattern — not an emotion classification)")
     return CATEGORY_UNCLASSIFIED, "mixed or weak evidence — no confident category"
 
 

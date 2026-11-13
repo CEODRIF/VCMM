@@ -145,6 +145,31 @@ class Settings(BaseSettings):
     #: job instead of resuming forever. Env: WORKER_INTEL_MAX_RESUMES.
     intel_max_resumes: int = Field(default=100000, ge=1)
 
+    # -- TASK 008: facecam intelligence (OPTIONAL modality) -------------------
+    #: Master switch. OFF by default — enabling it requires the optional
+    #: mediapipe extra (``worker/requirements-facecam.txt``; NOT in the base
+    #: install) AND explicit model paths below. A missing model/dependency
+    #: degrades to an honest ``unavailable`` result (recorded, no events),
+    #: never to fabricated data.
+    facecam_enabled: bool = False
+    #: Sampled frames per second of source for face analysis (bounded decode).
+    facecam_sample_fps: float = Field(default=1.0, gt=0, le=4)
+    #: Minimum detector confidence for a face to count (0..1).
+    facecam_min_confidence: float = Field(default=0.5, gt=0, le=1)
+    #: Maximum faces considered per frame (persistence — not size — selects
+    #: the facecam region, so multi-face layouts work).
+    facecam_max_faces: int = Field(default=3, ge=1, le=8)
+    #: Concurrency bound for inference sections (1 = strict sequential).
+    facecam_max_concurrency: int = Field(default=1, ge=1, le=8)
+    #: EXPLICIT, validated model files (Apache-2.0 MediaPipe Tasks models).
+    #: The detector model is required; the landmarker enables facial-geometry
+    #: metrics (mouth/smile/brow/head) — without it only face PRESENCE is
+    #: reported. Weights are NEVER downloaded during job execution.
+    facecam_detector_model_path: str | None = None
+    facecam_landmarker_model_path: str | None = None
+    #: Wall-clock budget for the per-chunk FFmpeg frame-extraction pass.
+    facecam_frame_timeout_seconds: float = Field(default=120.0, gt=0, le=3600)
+
     @field_validator("transcription_language")
     @classmethod
     def _empty_language_to_none(cls, value: str | None) -> str | None:

@@ -1,0 +1,13 @@
+# TASK 008 — Facecam Intelligence: OPTIONAL extra.
+#
+# NOT installed by the base requirements.txt — the worker runs the full
+# Phase 7 pipeline without it. Install only when WORKER_FACECAM_ENABLED=true:
+#
+#     pip install -r requirements-facecam.txt
+#
+# Local CPU inference only (no cloud API, no paid service, no GPU needed).
+# Model weights are NOT part of the package or this install: they are
+# explicitly configured (WORKER_FACECAM_DETECTOR_MODEL_PATH /
+# WORKER_FACECAM_LANDMARKER_MODEL_PATH) and validated at first use. A
+# missing model degrades to an honest "unavailable" result.
+mediapipe==1.2.3

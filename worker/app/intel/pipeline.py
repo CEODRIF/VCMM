@@ -48,6 +48,14 @@ from .audio_features import (
 from .chunk_plan import plan_chunks, ownership_bounds
 from .checkpoints import IntelStore
 from .detectors import detect_audio_events, detect_visual_events
+from .facecam import (
+    FacecamAnalyzer,
+    FacecamCancelled,
+    FacecamConfig,
+    detect_facecam_events,
+    summarize_facecam,
+    unavailable_report,
+)
 from .fusion import FusionConfig, fuse
 from .selection import SelectedClip, SelectionConfig, select_clips
 from .signals import SignalEvent
@@ -76,6 +84,9 @@ class PipelineConfig:
     fusion: FusionConfig = field(default_factory=FusionConfig)
     selection: SelectionConfig = field(default_factory=SelectionConfig)
     requested_clips: int = 5
+    #: TASK 008: facecam modality config (None = disabled → the pipeline
+    #: behaves EXACTLY as before, zero overhead, zero behavioral change).
+    facecam: FacecamConfig | None = None
 
     def __post_init__(self) -> None:
         if self.overlap_seconds < 0 or self.overlap_seconds >= self.chunk_seconds:
@@ -93,17 +104,51 @@ class PipelineResult:
     events: list[SignalEvent]  # all persisted events (complete) / [] (incomplete)
     candidates: list[SelectedClip]  # ranked (complete) / [] (incomplete)
     features_summaries: list[dict[str, Any]] = field(default_factory=list)
+    #: TASK 008: job-level facecam metadata (measured presence/region/model)
+    #: — {} when facecam was disabled, {"available": False, "reason": ...}
+    #: when it was configured but unavailable (never fabricated).
+    facecam: dict[str, Any] = field(default_factory=dict)
 
 
 class StreamIntelPipeline:
     """Runs (or resumes) the intel analysis for one job's source file."""
 
-    def __init__(self, ffmpeg_path: str, store: IntelStore, config: PipelineConfig) -> None:
+    def __init__(
+        self,
+        ffmpeg_path: str,
+        store: IntelStore,
+        config: PipelineConfig,
+        facecam_analyzer: FacecamAnalyzer | None = None,
+    ) -> None:
         self._ffmpeg = ffmpeg_path
         self._store = store
         self._config = config
+        #: TASK 008: optional facecam analyzer (per-job; None or not
+        #: available → the pipeline is byte-for-byte the Phase 7 behavior).
+        self._facecam = facecam_analyzer
 
     async def run(
+        self,
+        job_id: str,
+        source_path: Path,
+        total_duration: float,
+        temp_dir: Path,
+        should_stop: Optional[Callable[[], bool]] = None,
+    ) -> PipelineResult:
+        """Runs (or resumes) the analysis. Owns the facecam analyzer's
+        lifecycle: the native model is closed on EVERY exit path
+        (complete, incomplete, cancelled, error) — TASK 008."""
+        try:
+            return await self._run_impl(job_id, source_path, total_duration,
+                                        temp_dir, should_stop)
+        finally:
+            if self._facecam is not None:
+                try:
+                    await self._facecam.close()
+                except Exception:  # noqa: BLE001 — teardown best-effort
+                    logger.debug("facecam analyzer close raised", exc_info=True)
+
+    async def _run_impl(
         self,
         job_id: str,
         source_path: Path,
@@ -142,6 +187,42 @@ class StreamIntelPipeline:
             )
 
             raw_events = detect_audio_events(audio_feats) + detect_visual_events(visual_feats)
+
+            # TASK 008: optional facecam pass. An UNAVAILABLE facecam (no
+            # model, missing dep, extraction failure) changes NOTHING about
+            # the chunk outcome — audio/visual events persist as before and
+            # the unavailable reason is recorded honestly in the summary.
+            facecam_summary = None
+            if cfg.facecam is not None and self._facecam is not None:
+                if self._facecam.available:
+                    facecam_dir = temp_dir / f"facecam-chunk-{span.index:04d}"
+                    try:
+                        report = await self._facecam.analyze_chunk(
+                            self._ffmpeg, source_path, span.start, span.duration,
+                            facecam_dir, should_stop,
+                        )
+                    except FacecamCancelled:
+                        raise PipelineCancelled()
+                    except Exception as exc:  # noqa: BLE001 — optional modality boundary
+                        logger.warning("job %s: facecam chunk %d failed (%s); continuing without it",
+                                       job_id, span.index, exc.__class__.__name__)
+                        report = unavailable_report(span.start, span.duration,
+                                                     cfg.facecam.sample_fps,
+                                                     f"unexpected: {exc.__class__.__name__}")
+                    facecam_summary = report.storage_summary()
+                    if report.available:
+                        raw_events = raw_events + detect_facecam_events(
+                            report.observations, report.region, cfg.facecam, span.start,
+                            model_name=report.model,
+                        )
+                else:
+                    # Honest record: facecam was configured but unavailable
+                    # (disabled, no model, missing dep) — no events, no cost.
+                    facecam_summary = unavailable_report(
+                        span.start, span.duration, cfg.facecam.sample_fps,
+                        self._facecam.unavailable_reason or "facecam unavailable",
+                    ).storage_summary()
+
             lower, upper = bounds[span.index]
             owned = [e for e in raw_events if lower <= e.t < upper]
 
@@ -151,6 +232,8 @@ class StreamIntelPipeline:
                 **audio_feats.storage_summary(),
                 **visual_feats.storage_summary(),
             }
+            if facecam_summary is not None:
+                summary["facecam"] = facecam_summary  # nested: no key collision
             await self._store.upsert_events(job_id, owned)
             await self._store.mark_chunk_done(job_id, span.index, span.start, span.end, summary)
             new_summaries[span.index] = summary
@@ -180,11 +263,14 @@ class StreamIntelPipeline:
         all_summaries = {**done, **{idx: {"features": s} for idx, s in new_summaries.items()}}
         silence_gaps: list[tuple[float, float]] = []
         summaries: list[dict[str, Any]] = []
+        facecam_summaries: list[dict[str, Any]] = []
         for row in all_summaries.values():
             feats = row.get("features") or {}
             summaries.append(feats)
             for gap in feats.get("silence_gaps") or []:
                 silence_gaps.append((float(gap[0]), float(gap[1])))
+            if "facecam" in feats:
+                facecam_summaries.append(feats["facecam"])
         silence_gaps.sort()
         candidates = select_clips(
             windows,
@@ -192,6 +278,10 @@ class StreamIntelPipeline:
             silence_gaps=silence_gaps,
             requested_clips=cfg.requested_clips,
             cfg=cfg.selection,
+        )
+        facecam_meta = (
+            summarize_facecam(facecam_summaries)
+            if cfg.facecam is not None and facecam_summaries else {}
         )
         return PipelineResult(
             status="complete",
@@ -201,4 +291,5 @@ class StreamIntelPipeline:
             events=events,
             candidates=candidates,
             features_summaries=summaries,
+            facecam=facecam_meta,
         )
