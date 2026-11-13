@@ -31,8 +31,31 @@ marks the clip `ready` with its storage path, and completes the job ONLY via
 the `complete_job_rendering` RPC — which the database enforces (it refuses
 unless every clip is `ready` with a stored object). Transient rendering
 failures requeue to the parked state (dedicated `render_attempts` budget);
-resumes skip clips already `ready`. Subtitle burn-in is Phase 5b. The worker
-never marks a job `completed` on its own.
+resumes skip clips already `ready`. The worker never marks a job `completed`
+on its own.
+
+Phase 5B burns **animated, word-synchronized subtitles** into the clips in
+the SAME FFmpeg command (libass `ass=` filter appended after the reframe
+plan — no second pipeline):
+
+- The analysis stage persists each clip's REAL word timings
+  (`clips.captions`, absolute seconds, clipped to the window); the renderer
+  converts them to clip-relative time and generates a deterministic ASS
+  file in the per-job temp dir. It never re-transcribes and never invents
+  text or timings — missing/invalid/overlapping/out-of-range entries are
+  dropped or resolved, and a corrupt payload degrades to a plain render.
+- Visual: karaoke per-word progression (a word settles into the base color
+  as it is spoken; upcoming words glow in the highlight color), 3 words per
+  line, bottom safe area, outline for readability — all configurable via
+  `WORKER_CAPTION_*` (see table below). The job-level `captions_enabled`
+  flag (Phase 2 column, default `true`) gates the feature per job; with it
+  off — or with no words — the render is byte-for-byte Phase 5A.
+- Language: Unicode-safe, Arabic RTL (bidi handled by libass/fribidi) and
+  mixed Arabic/Latin, English and German. Uppercase applies to Latin words
+  only. Rendering quality depends on the system's fontconfig: the default
+  font is DejaVu Sans (pinned in CI); Arabic contextual shaping requires an
+  FFmpeg build with libharfbuzz (the CI apt build has it; the local
+  ffmpeg-static does not — isolated glyphs). No fonts are bundled.
 
 ## Storage model — read this first
 
@@ -51,7 +74,12 @@ before the temp file is removed.
   the host or in the image — or set `WORKER_FFPROBE_PATH` /
   `WORKER_FFMPEG_PATH`. The Docker image installs them via apt.
 - The Phase 3, 4 **and 5** database migrations applied to the same Supabase
-  project (queue RPCs are granted to `service_role`).
+  project (queue RPCs are granted to `service_role`). Phase 5B adds one more
+  migration (`20261120000000`, `clips.captions jsonb`) — without it, clips
+  simply render without subtitles (the column is read defensively).
+- For subtitles: an FFmpeg build with **libass** (the CI apt build and the
+  bundled ffmpeg-static both include it) and a fontconfig-resolvable font
+  (DejaVu Sans by default; pinned via `fonts-dejavu-core` in CI).
 
 ### Transcription engine (Phase 4, optional but required to produce clips)
 
@@ -150,6 +178,15 @@ startup (see `app/config/settings.py`):
 | `WORKER_RENDER_CONCURRENCY` | `2` | Clips rendered in parallel per job (1-8); each clip is one FFmpeg subprocess |
 | `WORKER_RENDER_TIMEOUT_SECONDS` | `900` | Wall-clock budget for one clip render (0 < x ≤ 7200); the subprocess is killed and awaited after it |
 | `WORKER_MAX_CLIP_SIZE_BYTES` | `209715200` (200 MiB) | A rendered clip larger than this is rejected (not uploaded) |
+| `WORKER_CAPTION_FONT_FAMILY` | `DejaVu Sans` | libass font family (fontconfig-resolved; no markup characters) |
+| `WORKER_CAPTION_FONT_SIZE` | `88` | Glyph size in PlayRes pixels (24-200) |
+| `WORKER_CAPTION_BASE_COLOR` | `FFFFFF` | Spoken-word color (RRGGBB) — ASS PrimaryColour |
+| `WORKER_CAPTION_HIGHLIGHT_COLOR` | `00D7FF` | Upcoming-word glow color (RRGGBB) — ASS SecondaryColour |
+| `WORKER_CAPTION_OUTLINE_COLOR` | `000000` | Outline color (RRGGBB) |
+| `WORKER_CAPTION_OUTLINE_WIDTH` | `6` | Outline thickness (0-24) |
+| `WORKER_CAPTION_MARGIN_V` | `520` | Distance of the caption block from the bottom edge (60-1500) |
+| `WORKER_CAPTION_WORDS_PER_LINE` | `3` | Consecutive words per on-screen line (1-8) |
+| `WORKER_CAPTION_UPPERCASE` | `true` | Uppercase Latin words (Arabic/CJK never transformed) |
 
 ## Queue contract (Phases 3-5)
 

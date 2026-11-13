@@ -172,11 +172,45 @@ Seven phases, in order. Each phase ends with a shippable increment.
   (verified development project required; none was provisioned in this
   phase).
 
-## Phase 5B — Subtitles
+## Phase 5B — Animated subtitles ✅ (this commit)
 
-- Modern animated subtitles burned in from the transcription (word-level),
-  extending the existing render pipeline (`RenderSpec.captions` is already
-  carried by the contract).
+- **Persistence** (migration `20261120000000`, additive): `clips.captions
+  jsonb` carries the REAL word-level transcription of the clip window
+  (`{"words":[{"w","s","e"}]}`, absolute seconds, clipped to the window),
+  written by the analysis stage — the renderer never re-transcribes and
+  never invents words or timings. The job-level `captions_enabled` toggle
+  already existed (Phase 2).
+- **Engine** (`worker/app/rendering/captions.py`): pure, deterministic ASS
+  generation for libass — timestamp sanitization (missing/invalid/
+  overlapping/out-of-range entries dropped or resolved, never fabricated),
+  line segmentation (words-per-line chunk + silence-gap breaks), per-word
+  karaoke (`\k`) timing with the verified libass semantics (spoken word in
+  the base color, upcoming words in the highlight color), full escaping
+  (ASS markup in text, filtergraph path), and the persisted-payload parser
+  (any corrupt payload degrades to a plain render).
+- **Renderer** (`FFmpegRenderer`): the `ass=` filter is appended to the
+  SAME filter chain (after the reframe plan, PlayRes == 1080x1920) — one
+  command, no second pipeline. The ASS file lives in the per-job temp dir,
+  is filtergraph-escaped, and is removed on success, failure, timeout and
+  cancellation. With no words the command line is byte-for-byte Phase 5A.
+- **Style** (config, deterministic defaults): font family (DejaVu Sans),
+  size 88, base `FFFFFF`, highlight `00D7FF`, black outline 6px,
+  MarginV 520 (safe area), 3 words/line, Latin uppercase. All configurable
+  via `WORKER_CAPTION_*` env vars.
+- **Languages**: Unicode-safe; Arabic RTL (bidi by libass/fribidi, logical
+  order preserved in the file), English/German; uppercase never applied to
+  non-Latin scripts. Glyph coverage/shaping depend on the system's
+  fontconfig (documented); no bundled/paid fonts.
+- **Tests**: 35 unit (timing/segmentation/escaping/styles/RTL/Unicode),
+  11 real-FFmpeg integration (subtitles PROVEN in output pixels —
+  active-word progression at 5 timestamps, portrait + rotated sources,
+  Arabic/German, no-injection, style colors, timeout/cancellation cleanup,
+  contract preserved), 7 processor wiring (spec conversion, disabled,
+  missing, corrupt, resume, failure), +4 detector/store/config/extensions,
+  +7 pglite (column, round-trip, idempotency, RLS, no 5A regression).
+- Note: applied to a real Supabase project remains an explicit live step
+  (verified development project required; none was provisioned in this
+  phase).
 
 ## Phase 6 — Product completion
 
