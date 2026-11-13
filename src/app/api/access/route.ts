@@ -2,6 +2,7 @@ import "server-only";
 
 import { NextResponse } from "next/server";
 
+import { BodyTooLargeError, readJsonBody } from "@/lib/api/body";
 import { toErrorResponse } from "@/lib/api/errors";
 import { securityConfig } from "@/config/security";
 import { getClientIp, accessCodeRateLimiter } from "@/lib/security/rate-limit";
@@ -33,10 +34,12 @@ export async function POST(request: Request) {
     const limit = accessCodeRateLimiter.check(ip);
     if (limit.limited) {
       const minutes = Math.max(1, Math.ceil(limit.retryAfterMs / 60000));
-      return NextResponse.json(
+      const res = NextResponse.json(
         { error: `Too many attempts. Try again in about ${minutes} minute${minutes === 1 ? "" : "s"}.` },
         { status: 429 }
       );
+      res.headers.set("Retry-After", String(Math.max(1, Math.ceil(limit.retryAfterMs / 1000))));
+      return res;
     }
 
     // 2. Server configuration check (do not leak configuration state).
@@ -48,11 +51,14 @@ export async function POST(request: Request) {
       );
     }
 
-    // 3. Parse and verify.
+    // 3. Parse and verify (bounded body read — TASK 012).
     let body: unknown;
     try {
-      body = await request.json();
-    } catch {
+      body = await readJsonBody(request, securityConfig.bodyLimit.maxBytes);
+    } catch (err) {
+      if (err instanceof BodyTooLargeError) {
+        return NextResponse.json({ error: "Request payload is too large." }, { status: 413 });
+      }
       return NextResponse.json({ error: "Invalid JSON payload." }, { status: 400 });
     }
     const code = typeof (body as { code?: unknown })?.code === "string" ? ((body as { code: string }).code) : "";

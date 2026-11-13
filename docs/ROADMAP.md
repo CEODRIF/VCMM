@@ -406,11 +406,30 @@ branch `feat/task-011-source-providers`:
   credentials (documented in `worker/README.md`), live materialization is
   impossible until an explicitly licensed path is approved.
 
-## Phase 8 — Hardening & launch
+## Phase 8 — Product hardening & observability ✅ (TASK 012)
 
-- Load testing and queue backpressure.
-- Observability: structured metrics, alerting, request tracing.
-- Security review: rate limits, secret rotation, dependency audits.
-- Production deploy: Vercel (frontend), worker on dedicated compute with
-  volumes; production Supabase migration applied with review.
-- Launch checklist: docs, access-code distribution, monitoring on call.
+- Queue reliability audit: single-ownership, crash recovery, transition
+  validation, and bounded retry semantics confirmed in the DB RPCs (no
+  schema change needed); jittered exponential backoff added on the
+  worker claim path (transient failures stop hammering a degraded DB).
+- Worker lifecycle: bounded graceful shutdown (`WORKER_SHUTDOWN_GRACE_SECONDS`;
+  in-flight jobs finished inside the window, abandoned — never mis-marked
+  failed — after it), subprocess/HTTP-client cleanup on all paths, stale
+  temp-dir cleanup on startup.
+- Observability: structured JSON logs with `job_id`/`worker_id`/
+  `correlation_id`/`stage`/`attempt`/`provider`/`error_code`/`duration_ms`
+  and full secret + signed-URL redaction (redaction defect in short signed
+  tokens fixed); stdlib Prometheus metrics at `GET /metrics` with bounded
+  cardinality; `GET /ready` performing real bounded dependency probes
+  (liveness stays at `GET /health`).
+- API hardening: bounded JSON body reads (16 KiB → typed 413) on all POSTs,
+  per-session job-creation rate limit (10/min, `Retry-After`), 429
+  `Retry-After` on access-code throttling; error serialization and
+  anti-enumeration preserved and regression-tested.
+- Remaining Phase 8 items (not in TASK 012 scope):
+  - Load testing and queue backpressure tuning.
+  - Alerting on top of `/metrics` (pull-based scrape).
+  - Secret rotation procedure and dependency audits (ongoing).
+  - Production deploy: Vercel (frontend), worker on dedicated compute with
+    volumes; production Supabase migration applied with review.
+  - Launch checklist: docs, access-code distribution, monitoring on call.

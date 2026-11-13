@@ -308,6 +308,7 @@ pull requests:
 | Landing / Access / Creation / Processing / Results pages | Done |
 | Creation form validation (YouTube URL, Twitch VOD URL, clip count 1-10, duration 60-180s) | Done (client + server) |
 | Python worker + `GET /health` + settings + JSON logging + Docker | Done |
+| Product hardening & observability (TASK 012): `GET /ready` real dependency probes, `GET /metrics` bounded-cardinality Prometheus metrics, JSON logs with `job_id`/`worker_id`/`correlation_id`/`stage`/`attempt`/`error_code` + full secret/signed-URL redaction, jittered claim backoff, bounded graceful shutdown (jobs abandoned past grace are never mis-marked failed), stale temp cleanup, bounded JSON bodies (16 KiB → 413), per-session job-creation rate limit (10/min + Retry-After) | Done |
 | Supabase schema (3 tables, RLS deny-by-default) + Phase 2 columns | Version-controlled; tested against real Postgres (WASM); apply to a dev project before use |
 | Access-code authentication (rate-limited, constant-time, hash-only) | **Done — `POST /api/access`** |
 | Anonymous sessions (HttpOnly cookie, 24h, hash stored, sign-out) | **Done** |
@@ -378,12 +379,17 @@ pull requests:
 - Large uploads are not chunked/resumable at the storage protocol level; a
   browser interruption must re-PUT the whole file (the authorization can be
   re-requested and completion is idempotent, so a retry is always safe).
-- Rate limiting is per-instance (in-memory). On multi-instance Vercel the
-  effective limit is per-instance; a Redis-backed limiter is planned (Phase 8).
+- Rate limiting is per-instance (in-memory): access-code throttling is per
+  client IP, job creation per session — both in process memory. On
+  multi-instance Vercel the effective limit is per-instance; a Redis-backed
+  limiter is planned (Phase 8).
 - Worker concurrency is per-process; running several worker replicas is safe
   (claims are atomic in Postgres) but the in-flight view in `/health` is
   per-replica.
-- No monitoring/alerting yet (Phase 8).
+- Metrics live in the worker process (stdlib registry, `GET /metrics`) and
+  reset on restart; the database remains the system of record. Alerting on
+  the metrics is not wired yet (Phase 8) — scrape `/metrics` and `/ready`
+  with any pull-based monitor.
 
 ## Roadmap
 

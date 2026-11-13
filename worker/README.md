@@ -250,6 +250,8 @@ startup (see `app/config/settings.py`):
 | `WORKER_CONCURRENCY` | `2` | Jobs processed in parallel (1-16) |
 | `WORKER_JOB_LEASE_SECONDS` | `300` | Lease per claimed job (30-3600; matches the RPC rule) |
 | `WORKER_MAX_ATTEMPTS` | `3` | Reference retry budget; DB `jobs.max_attempts` is authoritative |
+| `WORKER_SHUTDOWN_GRACE_SECONDS` | `600` | On SIGTERM/SIGINT: seconds to wait for in-flight jobs before ABANDONING them (30-86400). Abandoned jobs are never marked failed — their lease expires and another worker recovers them |
+| `WORKER_TMP_STALE_SECONDS` | `172800` | Age (hours-scale) after which a `storage/tmp/<job-id>` directory from a CRASHED worker is removed on next startup (≥3600). Directories of live jobs are never touched |
 | `WORKER_FFMPEG_PATH` / `WORKER_FFPROBE_PATH` | `ffmpeg` / `ffprobe` | Binary locations (static builds, custom installs) |
 | `WORKER_FFPROBE_TIMEOUT_SECONDS` | `60` | Probe timeout (0 < x ≤ 600) |
 | `WORKER_REQUEST_TIMEOUT_SECONDS` | `30` | Must be > 0 and ≤ 300 |
@@ -438,6 +440,68 @@ unsupported provider → `provider_invalid_url` (permanent); unauthorized →
 `source_too_long` (permanent); transfer interrupted → `transfer_interrupted`
 (retryable); storage failure → `source_upload_failed` (retryable); cancelled →
 no failure write (lease-safe abandon).
+
+## Operational endpoints & observability (TASK 012)
+
+### Endpoints (FastAPI, port 8000)
+
+| Endpoint | Purpose | HTTP |
+| --- | --- | --- |
+| `GET /health` | **Liveness** — process is up (Docker `HEALTHCHECK` target). Never probes dependencies. | always 200 |
+| `GET /ready` | **Readiness** — real, bounded dependency probes (one `select` on `jobs`, one storage list, 5s each, 30s result cache). `200 {status:"ready"}` iff database ok **and** storage ok **and** ffmpeg enabled; otherwise `503 {status:"degraded", components:{...}}` naming every failing component. Missing OPTIONAL features (transcription/facecam/game_vision) are reported as `enabled`/`disabled`/`degraded` but never gate readiness. With `WORKER_WORKER_ENABLED=false` every component reports `disabled` and the endpoint is `200 ready` (API-only deployment). | 200 / 503 |
+| `GET /metrics` | Prometheus text format (stdlib registry, `text/plain; version=0.0.4`). | 200 |
+
+Never report "ready" merely because the process started — `/ready` performs real
+probes, and its results are cached for 30s so load balancers can poll freely.
+
+### Structured logging
+
+Every log line is a single JSON object on stdout:
+`{timestamp, level, logger, message}` plus, inside a claimed job's processing
+context, `job_id`, `worker_id`, `correlation_id` (16-hex, one per claim),
+`stage`, `attempt`, `provider`, `error_code` (when set) and whitelisted
+extra facts (`duration_ms`, `bytes`, `object_count`). Tracebacks are
+redacted with the same rules as messages: OAuth/refresh tokens,
+`Authorization`/`Cookie` headers (to end-of-line), `service_role`/
+`api_key`/`password`/`token`/`secret` values, and signed storage URLs
+(including short signatures) are masked as `***`. Job ids are UUIDs, so
+they are never treated as sensitive.
+
+### Metrics
+
+In-process, stdlib-only, **bounded cardinality** (fixed label domains —
+stage, provider, outcome, operation — plus a per-family series cap that
+drops and warns on overflow; no label ever carries a raw job id or URL):
+
+- `clipforge_jobs_claimed_total{stage}`, `clipforge_jobs_completed_total{stage}`,
+  `clipforge_jobs_failed_total{stage,error_category}`,
+  `clipforge_jobs_released_total{stage}`, `clipforge_job_cancellations_total{stage}`
+- `clipforge_queue_wait_seconds_{sum,count}{stage}` (first claim only),
+  `clipforge_job_processing_seconds_{sum,count}{stage}`
+- `clipforge_lease_renewals_failed_total`, `clipforge_claim_errors_total`,
+  `clipforge_storage_failures_total{operation}`, `clipforge_provider_validations_total{provider,outcome}`
+- gauges: `clipforge_worker_active_jobs`, `clipforge_worker_uptime_seconds`,
+  `clipforge_worker_consecutive_claim_errors`
+
+`error_category` is normalized to the closed set of queue-model error codes;
+anything else becomes `other`.
+
+### Shutdown & recovery
+
+On SIGTERM/SIGINT: the worker stops claiming, waits up to
+`WORKER_SHUTDOWN_GRACE_SECONDS` for in-flight jobs, then **abandons** any
+still-running job (task cancelled, subprocesses killed in their `finally`
+blocks, **no failure or completion written** — the lease expires and another
+worker recovers the job from its stage entry). Queue, storage and provider
+HTTP clients are then closed. On the next startup, `storage/tmp/<job-id>`
+directories older than `WORKER_TMP_STALE_SECONDS` are removed (live-job
+directories are never touched).
+
+### Claim backoff
+
+Claim-path failures (RPC/transport errors) back off exponentially with
+jitter: delay ∈ [base/2, base], base = min(60s, poll_interval × 2^errors,
+exponent capped at 5). A successful claim resets the counter.
 
 ## Queue contract (Phases 3-5)
 

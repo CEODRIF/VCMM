@@ -184,9 +184,14 @@ _SENSITIVE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?i)(\brefresh_token[\"']?\s*[:=]\s*[\"']?)([a-z0-9._~+/=-]{16,})"),
     re.compile(r"(?i)(\bclient_secret[\"']?\s*[:=]\s*[\"']?)([^\s\"',;]{8,})"),
     re.compile(r"(?i)(\b(token|api_key|apikey|secret|password)\s*[:=]\s*)([^\s\"',;]{8,})"),
-    # Signed supabase/storage URLs (query carries the signature)
-    re.compile(r"(?i)((?:https?://[^\s]*?storage[^\s]*?|TOKEN=)[^\s]*?\btoken=[^\s]+)"),
-    re.compile(r"(?i)\btoken=[a-z0-9._~+/-]{16,}"),
+    # Signed supabase/storage URLs (query carries the signature): mask from
+    # the FIRST `token=` parameter to the end of the URL — the signature IS
+    # the token value, and short signatures must not slip past the
+    # length-gated key=value pattern above.
+    re.compile(r"(?i)(https?://[^\s]*?\btoken=)[^\s]+"),
+    # Bare token= values (defense in depth). Own group, so it can never
+    # crash the redactor if pattern ordering changes.
+    re.compile(r"(?i)(\btoken=)[a-z0-9._~+/-]{16,}"),
 )
 
 

@@ -62,6 +62,16 @@ export const accessCodeRateLimiter = new SlidingWindowRateLimiter({
 });
 
 /**
+ * Shared limiter for job creation (per SESSION, TASK 012). Keyed by the
+ * verified session id — unforgeable, so the limit cannot be evaded by
+ * rotating IPs or sessions.
+ */
+export const jobCreationRateLimiter = new SlidingWindowRateLimiter({
+  windowMs: securityConfig.jobCreationRateLimit.windowMs,
+  max: securityConfig.jobCreationRateLimit.maxAttempts,
+});
+
+/**
  * Best-effort client IP extraction. Behind Vercel the first entry of
  * X-Forwarded-For is the original client; in dev it falls back to a
  * fixed key so limits still apply locally.
