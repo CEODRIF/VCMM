@@ -29,6 +29,28 @@ def test_health_returns_ok():
     assert parsed.astimezone(timezone.utc).utcoffset().total_seconds() == 0
 
 
+def test_health_reports_worker_heartbeat_when_present():
+    client = make_client()
+
+    class FakeWorker:
+        @property
+        def heartbeat(self):
+            return {"worker_id": "w1:123:abc", "active_jobs": 2, "uptime_seconds": 12.5}
+
+    client.app.state.worker = FakeWorker()
+    body = client.get("/health").json()
+    assert body["worker"] == {"worker_id": "w1:123:abc", "active_jobs": 2, "uptime_seconds": 12.5}
+
+
+def test_health_reports_worker_none_when_not_configured():
+    # Without Supabase credentials the ingestion loop is not started — the
+    # field is present but null (API-only mode).
+    client = make_client()
+    client.app.state.worker = None
+    body = client.get("/health").json()
+    assert body["worker"] is None
+
+
 def test_unknown_route_returns_404():
     client = make_client()
     assert client.get("/definitely-not-a-route").status_code == 404

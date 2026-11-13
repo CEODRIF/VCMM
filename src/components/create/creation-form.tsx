@@ -3,24 +3,24 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { CheckCircle2, Info, Loader2, Wand2, Youtube } from "lucide-react";
+import { CheckCircle2, Info, Loader2, RefreshCw, Square, Wand2, Youtube } from "lucide-react";
 
 import { appConfig } from "@/config/app";
-import type { CreationOptions, SourceType, UploadedFileMeta } from "@/types";
-import { cn } from "@/lib/utils";
+import type { SourceType } from "@/types";
+import { cn, formatBytes } from "@/lib/utils";
 import { validateClipCount, validateClipDuration, validateYoutubeUrl } from "@/lib/validation/clips";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Progress } from "@/components/ui/progress";
 import { Select } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { UploadArea } from "@/components/create/upload-area";
 
 const { clips, output } = appConfig;
 
-/** Duration options from min to max in step increments (60, 90, ... 180). */
 const DURATION_OPTIONS = Array.from(
   { length: Math.floor((clips.maxSeconds - clips.minSeconds) / clips.stepSeconds) + 1 },
   (_, index) => clips.minSeconds + index * clips.stepSeconds
@@ -37,34 +37,40 @@ interface FieldErrors {
   duration?: string;
 }
 
+type UploadStage = "idle" | "transferring" | "completing";
+
 /**
- * Main creation form — connected to the real job API since Phase 2.
+ * Main creation form — connected to the real job + upload APIs (Phase 3).
  *
- * On a valid submit the form POSTs to /api/v1/jobs (session cookie sent
- * automatically). A 401 means the user must enter the access code first;
- * a 201 means a real job row was created and we navigate to its live
- * processing page.
- *
- * REMAINING INTEGRATION POINT (Phase 3): upload-source jobs are created with
- * a reserved storage path; the actual file transfer arrives in Phase 3.
+ * Upload flow (all server-verified, no bytes through Vercel):
+ *   1. POST /api/v1/jobs                    → job row (status: uploading)
+ *   2. POST /api/v1/jobs/{id}/upload/authorize → signed URL (server path)
+ *   3. PUT {signedUrl}  (browser → Supabase Storage, real progress + cancel)
+ *   4. POST /api/v1/jobs/{id}/upload/complete  → object verified → job queued
+ *   5. Live status via GET /api/v1/jobs/{id} (processing page)
  */
 export function CreationForm() {
   const router = useRouter();
+
+  const [sourceType, setSourceType] = React.useState<SourceType>("youtube");
+  const [youtubeUrl, setYoutubeUrl] = React.useState("");
+  const [file, setFile] = React.useState<File | null>(null);
+  const [clipCount, setClipCount] = React.useState<number>(clips.defaultCount);
+  const [duration, setDuration] = React.useState<number>(clips.defaultSeconds);
+  const [captionsEnabled, setCaptionsEnabled] = React.useState(true);
+
+  const [errors, setErrors] = React.useState<FieldErrors>({});
   const [submitting, setSubmitting] = React.useState(false);
   const [authRequired, setAuthRequired] = React.useState(false);
   const [serverError, setServerError] = React.useState<string | null>(null);
   const [createdJobId, setCreatedJobId] = React.useState<string | null>(null);
-  const [sourceType, setSourceType] = React.useState<SourceType>("youtube");
-  const [youtubeUrl, setYoutubeUrl] = React.useState("");
-  const [file, setFile] = React.useState<UploadedFileMeta | null>(null);
-  const [clipCount, setClipCount] = React.useState<number>(clips.defaultCount);
-  const [duration, setDuration] = React.useState<number>(clips.defaultSeconds);
-  const [captionsEnabled, setCaptionsEnabled] = React.useState(true);
-  const [errors, setErrors] = React.useState<FieldErrors>({});
 
-  function clearSourceErrors() {
-    setErrors((previous) => ({ ...previous, source: undefined }));
-  }
+  // Real upload state (no fake progress).
+  const [uploadStage, setUploadStage] = React.useState<UploadStage>("idle");
+  const [uploadProgress, setUploadProgress] = React.useState(0);
+  const xhrRef = React.useRef<XMLHttpRequest | null>(null);
+
+  const busy = submitting || uploadStage !== "idle";
 
   function resetTransientState() {
     setAuthRequired(false);
@@ -72,10 +78,122 @@ export function CreationForm() {
     setCreatedJobId(null);
   }
 
+  function abortUpload() {
+    xhrRef.current?.abort();
+    xhrRef.current = null;
+    setUploadStage("idle");
+    setUploadProgress(0);
+  }
+
+  function extensionOf(name: string): string {
+    const match = name.toLowerCase().match(/\.([a-z0-9]+)$/);
+    return match?.[1] ?? "";
+  }
+
+  function mimeForFile(candidate: File): string {
+    if (candidate.type && candidate.type.startsWith("video/")) return candidate.type;
+    const byExt: Record<string, string> = {
+      mp4: "video/mp4",
+      mov: "video/quicktime",
+      webm: "video/webm",
+    };
+    return byExt[extensionOf(candidate.name)] ?? "application/octet-stream";
+  }
+
+  /** Step 2+3+4 for an already-created upload job. Returns true on success. */
+  async function runUpload(jobId: string): Promise<boolean> {
+    if (!file) return false;
+    try {
+      // 2) Authorize (server generates the storage path + signed URL).
+      setUploadStage("transferring");
+      setUploadProgress(0);
+      const authResponse = await fetch(`/api/v1/jobs/${jobId}/upload/authorize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fileName: file.name, sizeBytes: file.size, mimeType: mimeForFile(file) }),
+      });
+      const authData = (await authResponse.json().catch(() => null)) as {
+        uploadUrl?: string;
+        contentType?: string;
+        error?: string;
+      } | null;
+      if (!authResponse.ok || !authData?.uploadUrl) {
+        setUploadStage("idle");
+        setServerError(authData?.error ?? "Could not authorize the upload. Try again.");
+        return false;
+      }
+
+      // 3) Direct browser → private Supabase Storage transfer (real progress).
+      const uploaded = await putFile(authData.uploadUrl, authData.contentType ?? "application/octet-stream", file);
+      if (!uploaded) {
+        setUploadStage("idle");
+        return false; // error/cancel already surfaced
+      }
+
+      // 4) Completion verification (server checks the real object + size).
+      setUploadStage("completing");
+      const completeResponse = await fetch(`/api/v1/jobs/${jobId}/upload/complete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sizeBytes: file.size }),
+      });
+      const completeData = (await completeResponse.json().catch(() => null)) as { error?: string } | null;
+      if (!completeResponse.ok) {
+        setUploadStage("idle");
+        setServerError(completeData?.error ?? "Upload verification failed. Try the upload again.");
+        return false;
+      }
+      setUploadStage("idle");
+      setUploadProgress(0);
+      return true;
+    } catch {
+      setUploadStage("idle");
+      setServerError("Network error during upload. Check your connection and retry.");
+      return false;
+    }
+  }
+
+  /** XHR PUT so the UI can show real progress and cancel. */
+  function putFile(url: string, contentType: string, payload: File): Promise<boolean> {
+    return new Promise((resolve) => {
+      const xhr = new XMLHttpRequest();
+      xhrRef.current = xhr;
+      xhr.open("PUT", url);
+      xhr.setRequestHeader("Content-Type", contentType);
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          setUploadProgress(Math.round((event.loaded / event.total) * 100));
+        }
+      };
+      xhr.onload = () => {
+        xhrRef.current = null;
+        if (xhr.status >= 200 && xhr.status < 300) resolve(true);
+        else {
+          setServerError("The storage transfer failed. Retry the upload.");
+          resolve(false);
+        }
+      };
+      xhr.onerror = () => {
+        xhrRef.current = null;
+        setServerError("The storage transfer failed. Check your connection and retry.");
+        resolve(false);
+      };
+      xhr.onabort = () => {
+        xhrRef.current = null;
+        setServerError("Upload cancelled. You can start the upload again.");
+        resolve(false);
+      };
+      xhr.send(payload);
+    });
+  }
+
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (busy) return;
     resetTransientState();
+    setErrors({});
 
+    // 1) Client-side validation (the server re-validates everything).
     const nextErrors: FieldErrors = {};
     if (sourceType === "youtube") {
       const urlCheck = validateYoutubeUrl(youtubeUrl);
@@ -87,55 +205,62 @@ export function CreationForm() {
     if (!countCheck.valid) nextErrors.clipCount = countCheck.error;
     const durationCheck = validateClipDuration(duration);
     if (!durationCheck.valid) nextErrors.duration = durationCheck.error;
-
     setErrors(nextErrors);
-    if (Object.values(nextErrors).some(Boolean)) {
-      return;
-    }
-
-    // Server re-validates everything; the payload carries no session or
-    // ownership data (ownership comes from the HttpOnly session cookie).
-    const payload = {
-      sourceType,
-      youtubeUrl: sourceType === "youtube" ? youtubeUrl.trim() : undefined,
-      fileName: sourceType === "upload" ? file?.name : undefined,
-      clipCount,
-      clipDurationSeconds: duration,
-      captionsEnabled,
-    };
+    if (Object.values(nextErrors).some(Boolean)) return;
 
     setSubmitting(true);
     try {
+      // Step 1: create the job (no session/ownership data — cookie only).
       const response = await fetch("/api/v1/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          sourceType,
+          youtubeUrl: sourceType === "youtube" ? youtubeUrl.trim() : undefined,
+          fileName: sourceType === "upload" ? file?.name : undefined,
+          clipCount,
+          clipDurationSeconds: duration,
+          captionsEnabled,
+        }),
       });
       const data = (await response.json().catch(() => null)) as {
         error?: string;
-        job?: { id: string };
+        job?: { id: string; status: string };
       } | null;
 
       if (response.status === 401) {
         setAuthRequired(true);
         return;
       }
-      if (response.status === 400) {
-        setServerError(data?.error ?? "The server rejected this configuration.");
+      if (!response.ok || !data?.job) {
+        // Includes 503 "YouTube provider not configured" with a clear message.
+        setServerError(data?.error ?? "Could not create the job. Try again.");
         return;
       }
-      if (response.status === 201 && data?.job) {
-        setCreatedJobId(data.job.id);
-        router.push(`/processing?job=${data.job.id}`);
+
+      const jobId = data.job.id;
+      setCreatedJobId(jobId);
+
+      if (sourceType === "upload") {
+        const ok = await runUpload(jobId);
+        if (ok) {
+          router.push(`/processing?job=${jobId}`);
+          return;
+        }
+        // Stay on the page: the job exists (status: uploading) and the user
+        // can retry the transfer safely.
         return;
       }
-      setServerError(data?.error ?? "Could not create the job. Try again.");
+
+      router.push(`/processing?job=${jobId}`);
     } catch {
       setServerError("Network error. Check your connection and try again.");
     } finally {
       setSubmitting(false);
     }
   }
+
+  const canRetryUpload = createdJobId !== null && sourceType === "upload" && !busy;
 
   return (
     <form onSubmit={handleSubmit} noValidate className="grid gap-6 lg:grid-cols-[1fr_340px]">
@@ -157,12 +282,14 @@ export function CreationForm() {
                 type="button"
                 role="tab"
                 aria-selected={sourceType === tab.value}
+                disabled={busy}
                 onClick={() => {
                   setSourceType(tab.value);
-                  clearSourceErrors();
+                  setErrors((previous) => ({ ...previous, source: undefined }));
+                  resetTransientState();
                 }}
                 className={cn(
-                  "flex items-center gap-2 rounded-md border px-4 py-2 text-sm font-medium transition-colors",
+                  "flex items-center gap-2 rounded-md border px-4 py-2 text-sm font-medium transition-colors disabled:opacity-60",
                   sourceType === tab.value
                     ? "border-primary/50 bg-primary/15 text-accent-foreground"
                     : "border-input bg-background/40 text-muted-foreground hover:text-foreground"
@@ -183,9 +310,11 @@ export function CreationForm() {
                 inputMode="url"
                 placeholder="https://youtube.com/watch?v=..."
                 value={youtubeUrl}
+                disabled={busy}
                 onChange={(event) => {
                   setYoutubeUrl(event.target.value);
-                  clearSourceErrors();
+                  setErrors((previous) => ({ ...previous, source: undefined }));
+                  resetTransientState();
                 }}
                 aria-invalid={errors.source ? true : undefined}
                 className={cn(errors.source && "border-destructive focus-visible:ring-destructive")}
@@ -196,23 +325,69 @@ export function CreationForm() {
                 </p>
               )}
               <p className="text-xs text-muted-foreground">
-                In production the video is fetched through an authorized source provider, not the
-                browser.
+                YouTube sources require an authorized source provider; if none is configured on this
+                deployment you will get a clear message, and direct upload always works.
               </p>
             </div>
           ) : (
-            <UploadArea
-              file={file}
-              error={errors.source}
-              onFileSelected={(next) => {
-                setFile(next);
-                clearSourceErrors();
-              }}
-              onFileCleared={() => {
-                setFile(null);
-                clearSourceErrors();
-              }}
-            />
+            <div className="flex flex-col gap-4">
+              <UploadArea
+                file={file}
+                disabled={busy}
+                error={errors.source}
+                onFileSelected={(next) => {
+                  setFile(next);
+                  setErrors((previous) => ({ ...previous, source: undefined }));
+                  resetTransientState();
+                }}
+                onFileCleared={() => {
+                  setFile(null);
+                  setErrors((previous) => ({ ...previous, source: undefined }));
+                  resetTransientState();
+                }}
+              />
+
+              {uploadStage !== "idle" && createdJobId && (
+                <div className="flex flex-col gap-2 rounded-md border bg-background/40 p-4">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="font-medium">
+                      {uploadStage === "transferring" ? "Uploading to private storage…" : "Verifying upload…"}
+                    </span>
+                    <span className="tabular-nums text-muted-foreground">
+                      {uploadStage === "transferring" ? `${uploadProgress}%` : "…"}
+                    </span>
+                  </div>
+                  <Progress value={uploadStage === "transferring" ? uploadProgress : 100} />
+                  <p className="text-xs text-muted-foreground">
+                    {file ? `${file.name} (${formatBytes(file.size)})` : ""}
+                    {" — transferred directly from your browser; nothing is proxied through the app server."}
+                  </p>
+                  {uploadStage === "transferring" && (
+                    <Button type="button" variant="outline" size="sm" className="self-start" onClick={abortUpload}>
+                      <Square size={14} /> Cancel upload
+                    </Button>
+                  )}
+                </div>
+              )}
+
+              {canRetryUpload && (
+                <div className="flex items-center gap-3">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => {
+                      if (createdJobId) void runUpload(createdJobId);
+                    }}
+                  >
+                    <RefreshCw size={14} /> Retry upload
+                  </Button>
+                  <p className="text-xs text-muted-foreground">
+                    Job {createdJobId} is waiting for its file — retry re-requests a fresh authorization.
+                  </p>
+                </div>
+              )}
+            </div>
           )}
         </CardContent>
       </Card>
@@ -228,9 +403,8 @@ export function CreationForm() {
             <Select
               id="clip-count"
               value={clipCount}
-              onChange={(event) => {
-                setClipCount(Number(event.target.value));
-              }}
+              disabled={busy}
+              onChange={(event) => setClipCount(Number(event.target.value))}
             >
               {COUNT_OPTIONS.map((count) => (
                 <option key={count} value={count}>
@@ -250,9 +424,8 @@ export function CreationForm() {
             <Select
               id="clip-duration"
               value={duration}
-              onChange={(event) => {
-                setDuration(Number(event.target.value));
-              }}
+              disabled={busy}
+              onChange={(event) => setDuration(Number(event.target.value))}
             >
               {DURATION_OPTIONS.map((seconds) => (
                 <option key={seconds} value={seconds}>
@@ -261,7 +434,7 @@ export function CreationForm() {
               ))}
             </Select>
             <p className="text-xs text-muted-foreground">
-              Minimum {clips.minSeconds}s, maximum {clips.maxSeconds}s.
+              Minimum {clips.minSeconds}s, maximum {clips.maxSeconds}s (each clip).
             </p>
             {errors.duration && (
               <p className="text-sm text-destructive" role="alert">
@@ -292,25 +465,9 @@ export function CreationForm() {
             </div>
           </div>
 
-          <Checkbox
-            id="captions"
-            checked={captionsEnabled}
-            onChange={(event) => setCaptionsEnabled(event.target.checked)}
-          >
+          <Checkbox id="captions" checked={captionsEnabled} disabled={busy} onChange={(event) => setCaptionsEnabled(event.target.checked)}>
             <span className="text-sm">Modern animated subtitles</span>
           </Checkbox>
-
-          <Button type="submit" size="lg" className="w-full" disabled={submitting}>
-            {submitting ? (
-              <>
-                <Loader2 size={16} className="animate-spin" /> Creating…
-              </>
-            ) : (
-              <>
-                <Wand2 size={16} /> Start Creating
-              </>
-            )}
-          </Button>
 
           {authRequired && (
             <div
@@ -328,26 +485,39 @@ export function CreationForm() {
             </div>
           )}
 
-          {serverError && (
+          {serverError && !authRequired && (
             <p className="text-sm text-destructive" role="alert">
               {serverError}
             </p>
           )}
 
-          {createdJobId && (
+          {createdJobId && sourceType !== "upload" && (
             <div
               className="flex items-start gap-3 rounded-md border border-primary/30 bg-primary/10 p-3 text-sm text-accent-foreground"
               role="status"
             >
               <CheckCircle2 size={18} className="mt-0.5 shrink-0 text-primary" />
-              <p>Job {createdJobId} created — opening the live processing view.</p>
+              <p>Job created — opening the live processing view.</p>
             </div>
           )}
 
+          <Button type="submit" size="lg" className="w-full" disabled={busy}>
+            {busy ? (
+              <>
+                <Loader2 size={16} className="animate-spin" />
+                {uploadStage === "idle" ? "Working…" : "Uploading…"}
+              </>
+            ) : (
+              <>
+                <Wand2 size={16} /> Start Creating
+              </>
+            )}
+          </Button>
+
           <p className="flex items-start gap-2 text-xs text-muted-foreground">
             <Info size={13} className="mt-0.5 shrink-0" />
-            Jobs are created and tracked in Phase 2. Video download, transcription and rendering
-            run in the worker during Phases 3-5, and uploads transfer in Phase 3.
+            Uploads go directly to private storage and are verified server-side; the worker validates
+            the media with FFprobe (Phase 3). AI transcription and clip detection arrive in Phase 4.
           </p>
         </CardContent>
       </Card>

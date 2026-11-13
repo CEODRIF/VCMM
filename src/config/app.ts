@@ -37,10 +37,17 @@ export const appConfig = {
     codeMaxLength: 128,
   },
 
-  /** Ordered processing state machine. */
+  /**
+   * Ordered processing state machine (Phase 3 ingestion lifecycle:
+   * uploading → queued → validating → ready; the product pipeline continues
+   * ready → transcribing → analyzing → rendering → completed in Phases 4-5).
+   * Kept in sync with the PostgreSQL status constraint and the worker enum.
+   */
   processingStates: [
-    "queued",
     "uploading",
+    "queued",
+    "validating",
+    "ready",
     "transcribing",
     "analyzing",
     "rendering",

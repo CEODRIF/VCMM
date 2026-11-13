@@ -3,7 +3,9 @@ import {
   CheckCircle2,
   Clapperboard,
   FileAudio,
+  FlaskConical,
   Loader2,
+  PackageCheck,
   ScanSearch,
   Upload,
   type LucideIcon,
@@ -23,15 +25,25 @@ interface StateMeta {
 }
 
 const STATE_META: Record<ProcessingState, StateMeta> = {
-  queued: {
-    label: "Queued",
-    description: "Waiting for a worker to pick up the job.",
-    icon: Loader2,
-  },
   uploading: {
     label: "Uploading",
-    description: "Fetching the source video through the authorized provider.",
+    description: "Waiting for your video to be transferred to private storage.",
     icon: Upload,
+  },
+  queued: {
+    label: "Queued",
+    description: "Upload verified. Waiting for a worker to pick up the job.",
+    icon: Loader2,
+  },
+  validating: {
+    label: "Validating",
+    description: "A worker is inspecting the media (FFprobe) and checking format, streams and duration.",
+    icon: FlaskConical,
+  },
+  ready: {
+    label: "Ready",
+    description: "Ingestion complete. The AI pipeline (transcription and clip detection) continues in Phase 4.",
+    icon: PackageCheck,
   },
   transcribing: {
     label: "Transcribing",
@@ -138,7 +150,7 @@ export function ProcessingPanel({ job, live = false }: { job: Job; live?: boolea
       <Card className="card-surface h-fit animate-fade-in" style={{ animationDelay: "80ms" }}>
         <CardHeader>
           <CardTitle className="text-base">Pipeline states</CardTitle>
-          <CardDescription>All seven supported states.</CardDescription>
+          <CardDescription>All nine supported states (ingestion + product pipeline).</CardDescription>
         </CardHeader>
         <CardContent>
           <ol className="flex flex-col gap-1">

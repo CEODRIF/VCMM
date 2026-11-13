@@ -41,7 +41,8 @@ export async function GET(request: Request, context: { params: { jobId: string }
         progress: row.progress,
         createdAt: row.created_at,
         completedAt: row.completed_at,
-        errorMessage: row.status === "failed" ? (row.error_message ?? undefined) : undefined,
+        enqueuedAt: row.upload_completed_at,
+        errorMessage: row.status === "failed" ? (row.error_message ?? row.last_error ?? undefined) : undefined,
       },
     });
   } catch (error) {

@@ -27,12 +27,15 @@ export interface Job {
   sourceType: SourceType;
   sourceUrl?: string;
   requestedClips: number;
+  clipDurationSeconds?: number;
   status: ProcessingState;
   /** 0-100. */
   progress: number;
   errorMessage?: string;
   createdAt: string;
   completedAt?: string;
+  /** Set when the upload was verified and the job entered the queue. */
+  enqueuedAt?: string;
   expiresAt?: string;
 }
 

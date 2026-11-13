@@ -40,22 +40,28 @@ async function expectSqlError(sql: string, pattern: RegExp) {
 beforeAll(async () => {
   db = await PGlite.create();
 
-  const migrationsDir = join(process.cwd(), "supabase", "migrations");
-  const files = [
-    "20261113000000_initial_schema.sql",
-    "20261114000000_phase2_job_settings_and_session_lookup.sql",
-  ];
-  for (const file of files) {
-    await db.exec(readFileSync(join(migrationsDir, file), "utf-8"));
-  }
-
-  // Mirror the Supabase role model for testing:
+  // Mirror the Supabase role model: the roles must exist before the Phase 3
+  // migration (it grants EXECUTE on its queue RPCs to service_role), while
+  // the table grants must come after the migrations create the tables.
   //  - `anon`: the anonymous client role (subject to RLS, no bypass)
   //  - `service_role`: backend role with BYPASSRLS (used by the API server)
   await db.exec(`
     create role anon noinherit nologin;
     create role service_role noinherit nologin bypassrls;
     grant usage on schema public to anon, service_role;
+  `);
+
+  const migrationsDir = join(process.cwd(), "supabase", "migrations");
+  const files = [
+    "20261113000000_initial_schema.sql",
+    "20261114000000_phase2_job_settings_and_session_lookup.sql",
+    "20261115000000_phase3_queue_and_ingestion.sql",
+  ];
+  for (const file of files) {
+    await db.exec(readFileSync(join(migrationsDir, file), "utf-8"));
+  }
+
+  await db.exec(`
     grant select, insert, update, delete on public.processing_sessions, public.jobs, public.clips to anon, service_role;
   `);
 });

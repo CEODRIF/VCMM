@@ -3,18 +3,28 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 
 import { insertJob } from "@/lib/db/jobs";
+import { ApiError } from "@/lib/api/errors";
+import { getYouTubeProvider } from "@/lib/providers/youtube";
 import type { CreateJobInput } from "@/lib/jobs/validate";
 
 /**
- * Job creation service.
+ * Job creation service (Phase 3).
+ *
+ * - Upload jobs start in 'uploading' with a reserved per-job storage
+ *   location (satisfying the Phase 1 `jobs_source_present` constraint). The
+ *   authorization endpoint later pins the exact server-generated object
+ *   path, and the job is enqueued only after verified upload completion.
+ * - YouTube jobs require an AUTHORIZED source provider. When none is
+ *   configured, creation fails with a clear 503 — no unauthorized download
+ *   path exists in this codebase, and direct uploads remain fully functional.
  *
  * SECURITY: the session id comes from the server-verified session cookie
- * (see requireSession in api/auth.ts) — never from the request body.
+ * (requireSession) — never from the request body.
  */
 
 export interface CreateJobResult {
   id: string;
-  status: "queued";
+  status: "uploading" | "queued";
   createdAt: string;
 }
 
@@ -28,24 +38,38 @@ export async function createJob(input: CreateJobInput, sessionId: string): Promi
   const id = randomUUID();
   const createdAt = new Date().toISOString();
 
-  // For uploads the source file is reserved at a per-job storage path.
-  // INTEGRATION POINT (Phase 3): the actual multipart transfer fills this
-  // path; until then an upload job stays `queued` and cannot progress.
-  const sourcePath =
-    input.sourceType === "upload" ? `jobs/${id}/uploads/${sanitizeFileName(input.fileName ?? "video.mp4")}` : null;
+  if (input.sourceType === "youtube") {
+    const provider = getYouTubeProvider();
+    if (!provider.isAvailable()) {
+      throw new ApiError(
+        503,
+        "YouTube source provider is not configured on this deployment. Direct video file upload is available."
+      );
+    }
+    // INTEGRATION POINT (authorized provider only): an explicitly approved
+    // YouTubeSourceProvider implementation would materialize the source into
+    // private storage here. None ships with this codebase, so a configured
+    // but unwired provider is still refused rather than guessed at.
+    throw new ApiError(
+      503,
+      "YouTube source provider is not configured on this deployment. Direct video file upload is available."
+    );
+  }
 
+  // Upload: reserved storage location; replaced by the exact generated path
+  // at POST .../upload/authorize.
   await insertJob({
     id,
     sessionId,
-    sourceType: input.sourceType,
-    sourceUrl: input.sourceType === "youtube" ? input.youtubeUrl?.trim() : undefined,
-    sourcePath: sourcePath ?? undefined,
+    sourceType: "upload",
+    sourcePath: `sources/${id}/reserved`,
     requestedClips: input.clipCount,
     clipDurationSeconds: input.clipDurationSeconds,
     captionsEnabled: input.captionsEnabled,
+    initialStatus: "uploading",
   });
 
   // NOTE: internal storage paths are intentionally NOT returned to the
   // client (no private storage URLs in API responses).
-  return { id, status: "queued", createdAt };
+  return { id, status: "uploading", createdAt };
 }

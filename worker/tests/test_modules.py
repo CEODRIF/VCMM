@@ -10,15 +10,20 @@ WORKER_MODULES = [
     "app.config.settings",
     "app.config.logging",
     "app.queue.models",
+    "app.queue.supabase_queue",
     "app.processors.pipeline",
+    "app.processors.ingestion",
+    "app.storage.paths",
+    "app.storage.supabase_storage",
+    "app.validation.media",
     "app.transcription.base",
     "app.ai.clip_detection",
     "app.rendering.base",
-    "app.storage.paths",
+    "app.worker",
 ]
 
 
-def test_all_phase1_modules_import():
+def test_all_worker_modules_import():
     for name in WORKER_MODULES:
         module = importlib.import_module(name)
         assert module is not None
@@ -33,10 +38,13 @@ def test_pipeline_stage_order():
 def test_job_status_matches_frontend_states():
     from app.queue.models import JobStatus
 
-    # Must stay in sync with src/config/app.ts -> processingStates.
+    # Must stay in sync with src/config/app.ts -> processingStates
+    # and the jobs_status_check constraint (migration 20261115000000).
     assert [status.value for status in JobStatus] == [
-        "queued",
         "uploading",
+        "queued",
+        "validating",
+        "ready",
         "transcribing",
         "analyzing",
         "rendering",

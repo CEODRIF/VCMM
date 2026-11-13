@@ -1,7 +1,8 @@
-# ClipForge AI worker — Python 3.12
+# ClipForge AI worker — Python 3.12 + FFmpeg
 #
-# The worker is the ONLY service that touches video processing (downloads,
-# transcription, analysis, FFmpeg rendering). It never runs inside Vercel.
+# The worker is the ONLY service that touches video processing (queue
+# consumption, storage download, FFprobe validation — and, from Phase 4-5,
+# transcription and rendering). It never runs inside Vercel.
 
 FROM python:3.12-slim
 
@@ -10,6 +11,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
+# FFmpeg provides ffprobe (media validation) and, from Phase 4-5, rendering.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY requirements.txt .
@@ -17,7 +23,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 
-# Storage lives on a volume so rendered clips survive container restarts.
+# Ephemeral scratch space only — Supabase Storage is the durable source of
+# truth. tmp/ holds per-job download scratch and is cleaned after each job.
 RUN useradd --create-home appuser \
     && mkdir -p /data \
     && chown -R appuser:appuser /data
