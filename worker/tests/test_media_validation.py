@@ -19,6 +19,11 @@ from app.queue.models import (
     ERROR_CORRUPT_MEDIA,
     ERROR_FFPROBE,
     ERROR_INVALID_FILE,
+    ERROR_MATERIALIZATION_UNSUPPORTED,
+    ERROR_PROVIDER_INVALID_URL,
+    ERROR_PROVIDER_UNAVAILABLE,
+    ERROR_PROVIDER_UNAUTHORIZED,
+    ERROR_SOURCE_REJECTED,
     ERROR_NO_AUDIO,
     ERROR_NO_CLIPS,
     ERROR_NO_CLIPS_TO_RENDER,
@@ -180,6 +185,14 @@ def test_error_category_split_permanent_vs_transient():
         # set cannot be fixed by retrying.
         ERROR_RENDER_INVALID,
         ERROR_NO_CLIPS_TO_RENDER,
+        # Phase 8 (TASK 011, source providers) — the provider input or the
+        # deployment's authorization cannot change on retry: a re-queued
+        # job would just fail identically again.
+        ERROR_PROVIDER_UNAVAILABLE,
+        ERROR_PROVIDER_INVALID_URL,
+        ERROR_PROVIDER_UNAUTHORIZED,
+        ERROR_SOURCE_REJECTED,
+        ERROR_MATERIALIZATION_UNSUPPORTED,
     }
     # ...while infrastructure errors are retryable.
     for transient in (
