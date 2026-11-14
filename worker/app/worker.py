@@ -242,7 +242,9 @@ class IngestionWorker:
             yt = "oauth"
         else:
             yt = "keyless-oembed"
-        if s.twitch_client_id and s.twitch_client_secret:
+        if s.twitch_client_id and s.twitch_client_secret and s.twitch_oauth_refresh_token:
+            tw = "app-token+creator-oauth (clip import)"
+        elif s.twitch_client_id and s.twitch_client_secret:
             tw = "app-token"
         elif s.twitch_client_id:
             tw = "client-id"
@@ -251,8 +253,13 @@ class IngestionWorker:
         return {
             "youtube": yt,
             "twitch": tw,
+            "direct_url": "enabled" if s.direct_urls_enabled else "disabled",
             "master_switch": "on" if s.source_providers_enabled else "off",
-            "materialization": "unsupported (no official media-download API — by design)",
+            "materialization": (
+                "youtube: unsupported (no official media-download API — by design); "
+                "twitch: clips only (official Get Clips Download, creator OAuth); "
+                "direct_url: enabled when direct_url=enabled"
+            ),
         }
 
     # -- internals -------------------------------------------------------------

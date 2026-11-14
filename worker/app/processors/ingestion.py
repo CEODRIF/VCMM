@@ -15,8 +15,13 @@ below the provider is IDENTICAL for every source type — the download,
 probe, and completion code is shared, so the analysis pipeline never learns
 where a source came from. Provider sources are authorized, validated, and
 materialized through the provider layer ONLY; when no authorized
-materialization path exists (the shipped YouTube/Twitch adapters), the job
-fails permanently with a clear, honest error instead of guessing.
+materialization path exists (YouTube; Twitch VOD/live URLs), the job fails
+permanently with a clear, honest error instead of guessing.
+
+TASK 014 adds two materializing source types through the same branch:
+``twitch`` CLIP URLs (official Get Clips Download under creator
+authorization) and ``direct_url`` (SSRF-guarded streaming import of public
+video-file URLs) — no pipeline changes below the provider.
 """
 
 from __future__ import annotations
@@ -70,6 +75,21 @@ from ..storage.supabase_storage import StorageDownloadError, SupabaseStorage
 from ..validation.media import MediaValidationError, probe_media, validate_media
 
 logger = logging.getLogger("clipforge.ingestion")
+
+
+def _content_type_for(local_path: Path) -> str:
+    """Storage content type from the MATERIALIZED file's suffix.
+
+    The provider chose the suffix from the verified transfer (never from
+    a user-claimed MIME type), and the bytes were FFprobe-checked by the
+    provider before storage; the default (mp4) keeps every existing
+    source type byte-identical.
+    """
+    return {
+        ".mp4": "video/mp4",
+        ".webm": "video/webm",
+        ".mov": "video/quicktime",
+    }.get(Path(local_path).suffix.lower(), "video/mp4")
 
 
 class LeaseLostError(RuntimeError):
@@ -227,10 +247,22 @@ class IngestionProcessor:
         lease_task = asyncio.create_task(self._renew_lease(job_id, worker_id, _on_lease_lost))
         try:
             if not provider_is_configured(provider):
+                if provider.name == "direct_url":
+                    # The adapter is code-complete but operator-disabled:
+                    # name the exact switch so the operator can act.
+                    not_configured_message = (
+                        "direct video URL import is disabled on this deployment "
+                        "(WORKER_DIRECT_URLS_ENABLED) — upload the file directly "
+                        "instead"
+                    )
+                else:
+                    not_configured_message = (
+                        f"the {provider.name} source provider is not configured on this "
+                        "deployment — direct video file upload is available"
+                    )
                 await self._safe_fail(
                     job_id, worker_id, ERROR_PROVIDER_UNAVAILABLE,
-                    f"the {provider.name} source provider is not configured on this "
-                    "deployment — direct video file upload is available",
+                    not_configured_message,
                     permanent=True,
                 )
                 return
@@ -267,9 +299,11 @@ class IngestionProcessor:
                 return
 
             # 4) Authorized materialization. Only adapters with an explicit,
-            #    policy-compliant download path reach this line (none ships
-            #    in this build for youtube/twitch — the gate above stops
-            #    them; the infrastructure is real and tested via fakes).
+            #    policy-compliant download path reach this line: youtube
+            #    ships none (the gate above stops it); twitch materializes
+            #    CLIP URLs through the official Get Clips Download endpoint
+            #    under creator authorization; direct_url streams public
+            #    video-file URLs through the SSRF guard (TASK 014).
             tmp_dir.mkdir(parents=True, exist_ok=True)
             destination = tmp_dir / "source.bin"
             source_path = existing_source_path
@@ -280,7 +314,10 @@ class IngestionProcessor:
                     progress=self._transfer_progress(job_id, worker_id, state),
                     should_cancel=lambda: state["lease_lost"],
                 )
-                source_path = await self._materialization.store_source(job_id, worker_id, local_path)
+                source_path = await self._materialization.store_source(
+                    job_id, worker_id, local_path,
+                    content_type=_content_type_for(local_path),
+                )
                 await self._report(job_id, worker_id, 70)
             else:
                 # Idempotent re-claim (crash between pin and complete):
