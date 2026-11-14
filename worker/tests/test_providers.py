@@ -338,11 +338,13 @@ def test_twitch_unconfigured_reports_honestly_without_network():
     assert calls == []
 
 
-def test_twitch_materialization_refused():
+def test_twitch_materialization_refused_for_vod():
+    # TASK 014: the flag is True (clips have an authorized path), but a
+    # VOD URL still gets the honest, actionable refusal.
     p = TwitchProvider()
     with pytest.raises(MaterializationUnavailable):
         run(p.materialize("https://twitch.tv/videos/1", Path("/tmp/x")))
-    assert p.supports_materialization is False
+    assert p.supports_materialization is True
 
 
 # =============================================================================
@@ -429,7 +431,20 @@ def test_default_provider_capabilities_are_honest(ffprobe_bin):
     by_name = {p.name: p for p in providers}
     assert by_name["upload"].supports_validation and by_name["upload"].supports_materialization
     assert by_name["youtube"].supports_validation and not by_name["youtube"].supports_materialization
-    assert by_name["twitch"].supports_validation and not by_name["twitch"].supports_materialization
+    # TASK 014: twitch gained an AUTHORIZED clip materialization path
+    # (official Get Clips Download + creator OAuth); VOD/live media is
+    # still refused per-URL-class inside materialize().
+    assert by_name["twitch"].supports_validation and by_name["twitch"].supports_materialization
+    # TASK 014: direct video file URL imports (SSRF-guarded).
+    assert by_name["direct_url"].supports_validation and by_name["direct_url"].supports_materialization
+    # The direct_url adapter claims ONLY file-shaped public URLs —
+    # platform URLs always go to their platform adapters (honest gates).
+    assert by_name["direct_url"].can_handle("https://storage.example.com/vod.mp4")
+    assert not by_name["direct_url"].can_handle("https://www.youtube.com/watch?v=abc")
+    assert not by_name["direct_url"].can_handle("https://twitch.tv/videos/1")
+    assert not by_name["direct_url"].can_handle("https://clips.twitch.tv/SomeClip")
+    assert not by_name["direct_url"].can_handle("https://storage.example.com/vod.m3u8")
+    assert not by_name["direct_url"].can_handle("https://storage.example.com/notes.txt")
 
 
 def test_no_ytdlp_or_unauthorized_download_tooling():
