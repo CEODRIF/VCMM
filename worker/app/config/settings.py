@@ -277,6 +277,16 @@ class Settings(BaseSettings):
     #: header mode); id + secret enables the app-access-token flow.
     twitch_client_id: str | None = None
     twitch_client_secret: str | None = None
+    #: TASK 014 — CREATOR OAuth for Twitch CLIP import. The official
+    #: ``GET /helix/clips/downloads`` endpoint requires a USER access
+    #: token of the clip's broadcaster/editor with the
+    #: ``channel:manage:clips`` (or ``editor:manage:clips``) scope. This
+    #: is the creator's REFRESH token (used with the app id/secret above
+    #: via the official refresh_token grant) — the authorization that
+    #: makes clip materialization lawful. Without it, clip imports fail
+    #: with a clear, actionable error (never guessed, never worked
+    #: around). Server-side only.
+    twitch_oauth_refresh_token: str | None = None
     #: Official endpoint bases (overridable for tests/private mirrors).
     twitch_api_base: str = "https://api.twitch.tv/helix"
     twitch_oauth_base: str = "https://id.twitch.tv"
@@ -299,6 +309,51 @@ class Settings(BaseSettings):
     #: incrementally); the MECHANISM exists so a deployment can cap it.
     materialize_max_duration_seconds: float | None = Field(default=None, ge=0)
 
+    # -- TASK 014: universal link ingestion --------------------------------------
+    #: Master switch for DIRECT VIDEO FILE URL imports (source_type
+    #: ``direct_url``): public http(s) links pointing at a video file
+    #: (``.mp4``/``.webm``/``.mov``), fetched by the worker through the
+    #: SSRF guard (any PUBLIC host — the allowlist is the one check
+    #: dropped, every other guard applies). OFF → direct_url jobs fail
+    #: permanently with a clear "disabled" error; uploads + providers
+    #: are unaffected.
+    direct_urls_enabled: bool = True
+    #: Optional HOST ALLOWLIST for direct URL imports (comma-separated,
+    #: exact hostnames). EMPTY = any public host (the default, still
+    #: SSRF-guarded). Set it to restrict imports to your own storage
+    #: domains.
+    direct_url_host_allowlist: str | None = None
+    #: Total wall-clock budget (seconds) for ONE direct-URL transfer
+    #: (all attempts included) — bounds slow-drip sources. The
+    #: per-operation ``provider_request_timeout_seconds`` still applies
+    #: to each request inside the budget.
+    direct_url_transfer_deadline_seconds: float = Field(default=1800.0, gt=0, le=21600)
+    #: Host suffixes permitted for Twitch CLIP download URLs returned by
+    #: the official Get Clips Download endpoint (Twitch CDN domains).
+    #: The URL must be https AND match one of these suffixes AND pass
+    #: the full public-IP guard before any byte is fetched.
+    twitch_media_host_suffixes: str = "twitchcdn.net,twitch.tv,jtvnw.net"
+
+    @field_validator("direct_url_host_allowlist")
+    @classmethod
+    def _empty_direct_url_allowlist_to_none(cls, value: str | None) -> str | None:
+        """An empty env var means 'any public host', not the literal ''."""
+        return value or None
+
+    @field_validator("twitch_media_host_suffixes")
+    @classmethod
+    def _twitch_media_suffixes_sane(cls, value: str) -> str:
+        """Fail fast on garbage: each entry must look like a host suffix."""
+        for part in (p.strip().lower().rstrip(".") for p in value.split(",")):
+            if not part:
+                continue
+            if not all(c.isalnum() or c in "-." for c in part) or part.startswith("."):
+                raise ValueError(
+                    "WORKER_TWITCH_MEDIA_HOST_SUFFIXES must be a comma-separated "
+                    "list of host suffixes (e.g. twitchcdn.net,twitch.tv)"
+                )
+        return value
+
     @field_validator("transcription_language")
     @classmethod
     def _empty_language_to_none(cls, value: str | None) -> str | None:
@@ -318,6 +373,7 @@ class Settings(BaseSettings):
         "youtube_oauth_refresh_token",
         "twitch_client_id",
         "twitch_client_secret",
+        "twitch_oauth_refresh_token",
     )
     @classmethod
     def _empty_provider_secret_to_none(cls, value: str | None) -> str | None:
@@ -342,6 +398,13 @@ class Settings(BaseSettings):
             raise ValueError(
                 "WORKER_YOUTUBE_OAUTH_CLIENT_ID, WORKER_YOUTUBE_OAUTH_CLIENT_SECRET "
                 "and WORKER_YOUTUBE_OAUTH_REFRESH_TOKEN must be set together"
+            )
+        if self.twitch_oauth_refresh_token and not (
+                self.twitch_client_id and self.twitch_client_secret):
+            # The official refresh_token grant requires the app id + secret.
+            raise ValueError(
+                "WORKER_TWITCH_OAUTH_REFRESH_TOKEN requires WORKER_TWITCH_CLIENT_ID "
+                "and WORKER_TWITCH_CLIENT_SECRET (official refresh_token grant)"
             )
         return self
 
