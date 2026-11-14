@@ -306,19 +306,20 @@ pull requests:
 | --- | --- |
 | Frontend foundation (Next.js, TS strict, Tailwind, shadcn-compatible UI kit) | Done |
 | Landing / Access / Creation / Processing / Results pages | Done |
-| Creation form validation (YouTube URL, Twitch VOD URL, clip count 1-10, duration 60-180s) | Done (client + server) |
+| Creation form validation (YouTube URL, Twitch VOD/Clip URL, direct video-file URL, clip count 1-10, duration 60-180s) | Done (client + server; TASK 014 adds the universal "Video URL" tab with shape classification) |
 | Python worker + `GET /health` + settings + JSON logging + Docker | Done |
 | Product hardening & observability (TASK 012): `GET /ready` real dependency probes, `GET /metrics` bounded-cardinality Prometheus metrics, JSON logs with `job_id`/`worker_id`/`correlation_id`/`stage`/`attempt`/`error_code` + full secret/signed-URL redaction, jittered claim backoff, bounded graceful shutdown (jobs abandoned past grace are never mis-marked failed), stale temp cleanup, bounded JSON bodies (16 KiB → 413), per-session job-creation rate limit (10/min + Retry-After) | Done |
 | Supabase schema (3 tables, RLS deny-by-default) + Phase 2 columns | Version-controlled; tested against real Postgres (WASM); apply to a dev project before use |
 | Access-code authentication (rate-limited, constant-time, hash-only) | **Done — `POST /api/access`** |
 | Anonymous sessions (HttpOnly cookie, 24h, hash stored, sign-out) | **Done** |
- | Job creation API (`POST /api/v1/jobs`, session-scoped) | **Done** (upload → `uploading`; YouTube/Twitch → capability gate: 503 with a clear "not configured" or "cannot be materialized" message, no job row) |
+ | Job creation API (`POST /api/v1/jobs`, session-scoped) | **Done** (upload → `uploading`; TASK 014 per-class gates: YouTube → 503 honest refusal; Twitch VOD/live → 503 actionable; **Twitch clip → queued**; **direct file URL → queued as `direct_url`**; unrecognized → 400) |
  | Job status API (`GET /api/v1/jobs`, `GET /api/v1/jobs/[id]`) | **Done** (live polling UI, 9 states) |
  | Direct upload: authorize → browser PUT → verified completion | **Done** (signed URLs, private bucket, real progress + cancel + retry in the UI) |
  | Postgres job queue (atomic claim, leases, retry, crash recovery) | **Done** (restricted RPCs, tested on a real Postgres engine) |
  | Worker ingestion (claim → download → FFprobe validation → `ready`) | **Done** (bounded concurrency, lease renewal, graceful shutdown) |
   | YouTube source provider | **Phase 8 (TASK 011)** — worker validates metadata via official APIs (keyless oEmbed partial; Data API v3 with API key or OAuth); materialization is honestly unsupported (no official media-download API) → clear 503/permanent typed error. No authorized provider ships with the repo; uploads unaffected. No unauthorized downloader exists or may be added |
-  | Twitch source provider | **Phase 8 (TASK 011)** — worker validates VOD metadata via official Helix (Client-Id or app-access-token); live/channel URLs classified; materialization honestly unsupported (same boundary as YouTube) → clear 503/permanent typed error. No unauthorized path exists or may be added |
+  | Twitch source provider | **Phase 8 (TASK 011) → TASK 014** — worker validates VOD metadata via official Helix (Client-Id or app-access-token); live/channel URLs classified; **CLIP media import through the official `GET /clips/downloads` endpoint under the creator's OAuth authorization** (`WORKER_TWITCH_OAUTH_REFRESH_TOKEN`, scope `channel:manage:clips`) with per-cause permanent errors; VOD/live media has NO official endpoint → honest per-class refusal. No unauthorized path exists or may be added |
+  | Universal video link ingestion (TASK 014) | **Done (repo state)** — "Video URL" tab (YouTube/Twitch/direct, shape-classified client- AND server-side); direct `.mp4`/`.webm`/`.mov` public file URLs imported through the SSRF-guarded streaming path (per-hop DNS revalidation, redirect pre-resolution, size + wall-clock limits, pre-storage FFprobe, private bucket, per-extension content type, idempotent re-claim); `source_type 'direct_url'` via repository-only migration `20261126000000` (NOT applied to production). See [docs/link-ingestion.md](docs/link-ingestion.md) |
  | Worker analysis: audio extraction + local Whisper transcription + clip detection/scoring | **Done** (optional `faster-whisper` dependency; honest `transcription_unavailable` failure when not installed; word-level timestamps; 60-180s windows; explainable scores persisted to `clips`) |
   | Jobs parked at `analyzing` with detected clips | **Done** (stage-aware queue; crash recovery; bounded retries) |
   | Clip rendering pipeline (Phase 5A): claim parked → render cut/reframe/encode to 1080x1920 H.264+AAC → validate → upload to `clipforge-clips` → DB-guarded `completed` | **Done** (rotation-correct, aspect-ratio-preserving; resume + bounded render retries; no false `completed` possible) |
@@ -363,19 +364,23 @@ pull requests:
   `transcription_unavailable` error — no fake output is ever produced. With
   it, the first run downloads the selected model weights from Hugging Face
   once (plain file download, no API/credentials/cost).
-- YouTube/Twitch sources (Phase 8, TASK 011): the worker retrieves METADATA
-  from the official APIs only (keyless oEmbed partial; YouTube Data API v3
-  with an API key or OAuth; Twitch Helix with a client id or app-access
-  token) and classifies availability states honestly. MATERIALIZATION of
-  platform URLs is unsupported because the official APIs expose no
-  media-download endpoint — the API returns a clear 503 at creation (no job
-  row) and the worker fails such jobs permanently with "upload the file
-  directly" if one is ever enqueued. No yt-dlp/cookies/DRM-bypass/scraping
-  path exists in this codebase and none may be added. Live provider
-  operations are NOT verified by the test suite (mocked, offline tests only);
-  metadata live calls require operator-configured official credentials
-  (free-tier, no spend). Direct file upload is fully functional and
-  independent.
+- YouTube/Twitch sources (Phase 8, TASK 011 → TASK 014): the worker retrieves
+  METADATA from the official APIs only (keyless oEmbed partial; YouTube Data
+  API v3 with an API key or OAuth; Twitch Helix with a client id or
+  app-access token) and classifies availability states honestly. YouTube
+  media and Twitch VOD/live media are NOT importable — the official APIs
+  expose no media-download endpoint — and the API returns a clear 503 at
+  creation (no job row). **Twitch CLIPs ARE importable** through the official
+  Get Clips Download endpoint, but only under the clip owner's OAuth
+  authorization (creator refresh token on the worker); without it the job
+  fails permanently with the actionable message. **Direct video-file URLs**
+  (`.mp4`/`.webm`/`.mov` on public hosts) are imported through the
+  SSRF-guarded path (docs/link-ingestion.md). No yt-dlp/cookies/DRM-bypass/
+  scraping/unofficial-endpoint path exists in this codebase and none may be
+  added. Live provider operations are NOT verified by the test suite (mocked,
+  offline tests only); live calls require operator-configured official
+  credentials (free-tier, no spend). Direct file upload is fully functional
+  and independent.
 - Large uploads are not chunked/resumable at the storage protocol level; a
   browser interruption must re-PUT the whole file (the authorization can be
   re-requested and completion is idempotent, so a retry is always safe).
