@@ -30,7 +30,7 @@ export type JobStatus =
 export interface JobRow {
   id: string;
   session_id: string;
-  source_type: "youtube" | "twitch" | "upload";
+  source_type: "youtube" | "twitch" | "upload" | "direct_url";
   source_url: string | null;
   source_path: string | null;
   requested_clips: number;
@@ -58,7 +58,7 @@ export interface JobRow {
 export interface NewJobInput {
   id: string;
   sessionId: string;
-  sourceType: "youtube" | "twitch" | "upload";
+  sourceType: "youtube" | "twitch" | "upload" | "direct_url";
   sourceUrl?: string;
   sourcePath?: string;
   requestedClips: number;
