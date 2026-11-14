@@ -1,4 +1,5 @@
 import { appConfig } from "@/config/app";
+import { classifyVideoUrl } from "@/lib/validation/clips";
 import { z } from "zod";
 
 /**
@@ -23,7 +24,7 @@ const TWITCH_VOD_PATH = /^\/(?:[a-z0-9_]{1,25}\/)?videos\/\d{1,15}$/;
 
 export const createJobSchema = z
   .object({
-    sourceType: z.enum(["youtube", "twitch", "upload"]),
+    sourceType: z.enum(["youtube", "twitch", "upload", "direct_url"]),
     youtubeUrl: httpUrl
       .optional()
       .refine((value) => {
@@ -55,6 +56,20 @@ export const createJobSchema = z
         }
       }, "must be a Twitch VOD URL")
       .optional(),
+    /**
+     * TASK 014 — universal "Video URL" input. A single pasted URL,
+     * classified server-side (shape only) into youtube / twitch-vod /
+     * twitch-clip / twitch-live / direct-file. The service layer applies
+     * the honest capability gate per class (503 for what cannot be
+     * imported through an authorized mechanism; job creation for what can).
+     */
+    videoUrl: httpUrl
+      .optional()
+      .refine((value) => value === undefined || classifyVideoUrl(value) !== "unrecognized", {
+        message:
+          "must be a YouTube URL, a Twitch VOD/clip URL, or a direct video file URL (.mp4/.webm/.mov)",
+      })
+      .optional(),
     fileName: z
       .string()
       .min(1)
@@ -70,12 +85,17 @@ export const createJobSchema = z
   .refine(
     (data) => {
       if (data.sourceType === "youtube") return Boolean(data.youtubeUrl);
-      if (data.sourceType === "twitch") return Boolean(data.twitchUrl);
+      if (data.sourceType === "twitch") return Boolean(data.twitchUrl ?? data.videoUrl);
+      if (data.sourceType === "direct_url") {
+        const videoUrl = data.videoUrl;
+        return videoUrl !== undefined && classifyVideoUrl(videoUrl) === "direct-file";
+      }
       return Boolean(data.fileName);
     },
     {
       message:
-        "youtube sourceType requires youtubeUrl; twitch requires twitchUrl; upload requires fileName",
+        "youtube sourceType requires youtubeUrl; twitch requires twitchUrl; " +
+        "direct_url requires a direct video file URL (.mp4/.webm/.mov); upload requires fileName",
       path: ["sourceType"],
     }
   );

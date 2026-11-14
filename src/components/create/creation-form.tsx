@@ -3,12 +3,12 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { CheckCircle2, Info, Loader2, RefreshCw, Square, Twitch, Upload, Wand2, Youtube } from "lucide-react";
+import { CheckCircle2, Info, Link2, Loader2, RefreshCw, Square, Twitch, Upload, Wand2, Youtube } from "lucide-react";
 
 import { appConfig } from "@/config/app";
 import type { SourceType } from "@/types";
 import { cn, formatBytes } from "@/lib/utils";
-import { validateClipCount, validateClipDuration, validateTwitchUrl, validateYoutubeUrl } from "@/lib/validation/clips";
+import { classifyVideoUrl, validateClipCount, validateClipDuration, validateTwitchUrl, validateYoutubeUrl } from "@/lib/validation/clips";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -49,12 +49,41 @@ type UploadStage = "idle" | "transferring" | "completing";
  *   4. POST /api/v1/jobs/{id}/upload/complete  → object verified → job queued
  *   5. Live status via GET /api/v1/jobs/{id} (processing page)
  */
+/** The four source TABS. "video" is the TASK 014 universal link tab —
+ * its pasted URL is classified and the job is created with the REAL
+ * source type (youtube / twitch / direct_url). */
+type SourceTab = SourceType | "video";
+
+const VIDEO_TAB_HINTS: Record<string, { tone: "ok" | "warn"; text: string }> = {
+  "direct-file": {
+    tone: "ok",
+    text: "Direct video file link — the server downloads it through the secure import path (public files only, size and time limits apply).",
+  },
+  "twitch-clip": {
+    tone: "ok",
+    text: "Twitch clip — imported via the official Get Clips Download endpoint when creator authorization is configured on the server.",
+  },
+  youtube: {
+    tone: "warn",
+    text: "YouTube link — the official YouTube APIs expose metadata only (no authorized media download). To import a YouTube video, upload the file directly.",
+  },
+  "twitch-vod": {
+    tone: "warn",
+    text: "Twitch VOD — there is no official VOD media-download endpoint. Export the VOD from the Twitch dashboard and upload the file directly.",
+  },
+  "twitch-live": {
+    tone: "warn",
+    text: "Live stream — not a completed recording. Wait for the VOD, or upload the file directly.",
+  },
+};
+
 export function CreationForm() {
   const router = useRouter();
 
-  const [sourceType, setSourceType] = React.useState<SourceType>("youtube");
+  const [sourceType, setSourceType] = React.useState<SourceTab>("youtube");
   const [youtubeUrl, setYoutubeUrl] = React.useState("");
   const [twitchUrl, setTwitchUrl] = React.useState("");
+  const [videoUrl, setVideoUrl] = React.useState("");
   const [file, setFile] = React.useState<File | null>(null);
   const [clipCount, setClipCount] = React.useState<number>(clips.defaultCount);
   const [duration, setDuration] = React.useState<number>(clips.defaultSeconds);
@@ -196,12 +225,20 @@ export function CreationForm() {
 
     // 1) Client-side validation (the server re-validates everything).
     const nextErrors: FieldErrors = {};
+    const linkKind = sourceType === "video" ? classifyVideoUrl(videoUrl) : null;
     if (sourceType === "youtube") {
       const urlCheck = validateYoutubeUrl(youtubeUrl);
       if (!urlCheck.valid) nextErrors.source = urlCheck.error;
     } else if (sourceType === "twitch") {
       const urlCheck = validateTwitchUrl(twitchUrl);
       if (!urlCheck.valid) nextErrors.source = urlCheck.error;
+    } else if (sourceType === "video") {
+      if (!videoUrl.trim()) {
+        nextErrors.source = "Paste a video URL.";
+      } else if (linkKind === "unrecognized") {
+        nextErrors.source =
+          "Unrecognized link. Paste a YouTube URL, a Twitch VOD/clip URL, or a direct link ending in .mp4, .webm or .mov.";
+      }
     } else if (!file) {
       nextErrors.source = "Drop a video file or pick one from your device.";
     }
@@ -218,15 +255,33 @@ export function CreationForm() {
       const response = await fetch("/api/v1/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sourceType,
-            youtubeUrl: sourceType === "youtube" ? youtubeUrl.trim() : undefined,
-            twitchUrl: sourceType === "twitch" ? twitchUrl.trim() : undefined,
-            fileName: sourceType === "upload" ? file?.name : undefined,
-            clipCount,
-            clipDurationSeconds: duration,
-            captionsEnabled,
-          }),
+           body: JSON.stringify({
+             // TASK 014: the video tab submits the CLASSIFIED real source
+             // type (youtube → honest 503 refusal server-side; twitch
+             // → per-class gate: clips queued, VOD/live actionable 503;
+             // direct-file → queued as direct_url).
+             sourceType:
+               sourceType === "video"
+                 ? linkKind === "direct-file"
+                   ? "direct_url"
+                   : linkKind === "youtube"
+                     ? "youtube"
+                     : "twitch"
+                 : sourceType,
+             youtubeUrl:
+               sourceType === "youtube"
+                 ? youtubeUrl.trim()
+                 : sourceType === "video" && linkKind === "youtube"
+                   ? videoUrl.trim()
+                   : undefined,
+             twitchUrl: sourceType === "twitch" ? twitchUrl.trim() : undefined,
+             videoUrl:
+               sourceType === "video" && linkKind !== "youtube" ? videoUrl.trim() : undefined,
+             fileName: sourceType === "upload" ? file?.name : undefined,
+             clipCount,
+             clipDurationSeconds: duration,
+             captionsEnabled,
+           }),
       });
       const data = (await response.json().catch(() => null)) as {
         error?: string;
@@ -274,7 +329,9 @@ export function CreationForm() {
       <Card className="card-surface animate-fade-in">
         <CardHeader>
           <CardTitle>Source</CardTitle>
-          <CardDescription>Paste a YouTube or Twitch URL, or upload a video file.</CardDescription>
+          <CardDescription>
+            Paste a YouTube or Twitch URL, a direct video file link, or upload a video file.
+          </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-5">
           <div className="flex flex-wrap gap-2" role="tablist" aria-label="Source type">
@@ -282,6 +339,7 @@ export function CreationForm() {
               [
                 { value: "youtube", label: "YouTube URL", icon: <Youtube size={15} /> },
                 { value: "twitch", label: "Twitch VOD", icon: <Twitch size={15} /> },
+                { value: "video", label: "Video URL", icon: <Link2 size={15} /> },
                 { value: "upload", label: "Upload file", icon: <Upload size={15} /> },
               ] as const
             ).map((tab) => (
@@ -360,12 +418,58 @@ export function CreationForm() {
                   {errors.source}
                 </p>
               )}
-              <p className="text-xs text-muted-foreground">
-                Twitch sources require an authorized source provider; if none is configured on this
-                deployment you will get a clear message, and direct upload always works.
-              </p>
-            </div>
-          ) : (
+               <p className="text-xs text-muted-foreground">
+                 Twitch sources require an authorized source provider; if none is configured on this
+                 deployment you will get a clear message, and direct upload always works.
+               </p>
+             </div>
+           ) : sourceType === "video" ? (
+             <div className="flex flex-col gap-2">
+               <Label htmlFor="video-url">Video URL</Label>
+               <Input
+                 id="video-url"
+                 type="url"
+                 inputMode="url"
+                 placeholder="https://storage.example.com/streams/vod.mp4"
+                 value={videoUrl}
+                 disabled={busy}
+                 onChange={(event) => {
+                   setVideoUrl(event.target.value);
+                   setErrors((previous) => ({ ...previous, source: undefined }));
+                   resetTransientState();
+                 }}
+                 aria-invalid={errors.source ? true : undefined}
+                 className={cn(errors.source && "border-destructive focus-visible:ring-destructive")}
+               />
+               {errors.source && (
+                 <p className="text-sm text-destructive" role="alert">
+                   {errors.source}
+                 </p>
+               )}
+               {(() => {
+                 const kind = videoUrl.trim() ? classifyVideoUrl(videoUrl) : null;
+                 if (!kind) return null;
+                 const hint =
+                   kind === "unrecognized"
+                     ? {
+                         tone: "warn" as const,
+                         text: "Unrecognized link — paste a YouTube URL, a Twitch VOD/clip URL, or a direct link ending in .mp4, .webm or .mov.",
+                       }
+                     : VIDEO_TAB_HINTS[kind];
+                 if (!hint) return null;
+                 return (
+                   <p
+                     className={cn(
+                       "text-xs",
+                       hint.tone === "ok" ? "text-muted-foreground" : "text-amber-600 dark:text-amber-400"
+                     )}
+                   >
+                     {hint.text}
+                   </p>
+                 );
+               })()}
+             </div>
+           ) : (
             <div className="flex flex-col gap-4">
               <UploadArea
                 file={file}

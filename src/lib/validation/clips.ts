@@ -79,9 +79,76 @@ export function validateYoutubeUrl(url: string): ValidationResult {
   return { valid: true };
 }
 
-const TWITCH_HOSTS = new Set(["twitch.tv", "m.twitch.tv"]);
+const TWITCH_HOSTS = new Set(["twitch.tv", "m.twitch.tv", "go.twitch.tv"]);
 /** Canonical Twitch VOD paths: /videos/{id} or /{channel}/videos/{id}. */
 const TWITCH_VOD_PATH = /^\/(?:[a-z0-9_]{1,25}\/)?videos\/\d{1,15}$/;
+/**
+ * TASK 014 — universal link ingestion.
+ *
+ * Shape-only classification of a pasted video URL (NO network calls):
+ * this is the single source of truth shared by the client form (UX hints)
+ * and the job-creation API (authoritative gate). It mirrors the worker's
+ * provider claim rules exactly (platform adapters claim their hosts first;
+ * the direct_url provider claims public file-shaped URLs only).
+ */
+const VIDEO_FILE_EXTENSIONS = [".mp4", ".webm", ".mov"] as const;
+/** Platform endpoints — never direct-file hosts (they have their own adapters + honest gates). */
+const PLATFORM_HOST_SUFFIXES = ["youtube.com", "youtu.be", "twitch.tv", "twitchcdn.net", "jtvnw.net"];
+/** twitch.tv/clips/{slug} and twitch.tv/{channel}/clip/{slug}. */
+const TWITCH_CLIP_PATH = /^\/(?:[a-z0-9_]{1,25}\/)?clips?\/[a-z0-9][a-z0-9-]{0,99}(?:\/.*)?$/i;
+/** clips.twitch.tv/{slug} — the canonical clip short-link domain. */
+const CLIPS_SUBDOMAIN_PATH = /^\/[a-z0-9][a-z0-9-]{0,99}\/?$/i;
+/** twitch.tv/live/{channel} and bare /{channel} (live check). */
+const TWITCH_LIVE_PATH = /^\/(?:live\/)?[a-z0-9_]{1,25}\/?$/i;
+
+export type VideoUrlKind =
+  | "youtube"
+  | "twitch-vod"
+  | "twitch-clip"
+  | "twitch-live"
+  | "direct-file"
+  | "unrecognized";
+
+/**
+ * Classifies a pasted URL by its SHAPE only (host + path; no network).
+ * VOD paths win over clip/live shapes (guards a channel literally named
+ * "clips"), matching the worker's dispatch order.
+ */
+export function classifyVideoUrl(raw: string): VideoUrlKind {
+  let url: URL;
+  try {
+    url = new URL(raw.trim());
+  } catch {
+    return "unrecognized";
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return "unrecognized";
+  if (url.username !== "" || url.password !== "") return "unrecognized";
+  // The worker's SSRF guard permits standard ports only — classify as
+  // unrecognized so the API refuses honestly instead of queuing a job
+  // that would fail permanently.
+  if (url.port !== "") return "unrecognized";
+  const host = url.hostname.toLowerCase().replace(/^www\./, "").replace(/\.$/, "");
+  const path = url.pathname;
+
+  const isHost = (value: string, suffix: string) => value === suffix || value.endsWith("." + suffix);
+  if (host === "youtu.be" || isHost(host, "youtube.com")) return "youtube";
+
+  if (host === "clips.twitch.tv") {
+    return CLIPS_SUBDOMAIN_PATH.test(path) ? "twitch-clip" : "unrecognized";
+  }
+  if (isHost(host, "twitch.tv")) {
+    if (TWITCH_VOD_PATH.test(path)) return "twitch-vod";
+    if (TWITCH_CLIP_PATH.test(path)) return "twitch-clip";
+    if (path !== "/" && TWITCH_LIVE_PATH.test(path)) return "twitch-live";
+    return "unrecognized";
+  }
+
+  if (PLATFORM_HOST_SUFFIXES.some((suffix) => host === suffix || host.endsWith("." + suffix))) {
+    return "unrecognized";
+  }
+  const lower = path.toLowerCase();
+  return VIDEO_FILE_EXTENSIONS.some((ext) => lower.endsWith(ext)) ? "direct-file" : "unrecognized";
+}
 
 /** Validates that a string is a canonical Twitch VOD URL (client-side UX). */
 export function validateTwitchUrl(url: string): ValidationResult {

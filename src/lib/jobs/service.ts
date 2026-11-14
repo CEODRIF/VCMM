@@ -4,8 +4,8 @@ import { randomUUID } from "node:crypto";
 
 import { insertJob } from "@/lib/db/jobs";
 import { ApiError } from "@/lib/api/errors";
-import { getTwitchProvider } from "@/lib/providers/twitch";
 import { getYouTubeProvider } from "@/lib/providers/youtube";
+import { classifyVideoUrl } from "@/lib/validation/clips";
 import type { CreateJobInput } from "@/lib/jobs/validate";
 
 /**
@@ -18,6 +18,16 @@ import type { CreateJobInput } from "@/lib/jobs/validate";
  * - YouTube jobs require an AUTHORIZED source provider. When none is
  *   configured, creation fails with a clear 503 — no unauthorized download
  *   path exists in this codebase, and direct uploads remain fully functional.
+ * - TASK 014 — universal link ingestion:
+ *   - `direct_url` jobs (public http(s) links to .mp4/.webm/.mov files,
+ *     classified by shape) are queued; the worker downloads them through
+ *     the SSRF guard, FFprobe-validates the bytes, and stores the object
+ *     in the private sources bucket.
+ *   - Twitch CLIP URLs are queued (the worker imports them through the
+ *     official Get Clips Download endpoint under the creator's OAuth
+ *     authorization; per-class runtime gates apply). Twitch VOD and
+ *     live URLs are refused with distinct actionable 503s (platform
+ *     facts — no authorized VOD media endpoint exists).
  *
  * SECURITY: the session id comes from the server-verified session cookie
  * (requireSession) — never from the request body.
@@ -68,30 +78,57 @@ export async function createJob(input: CreateJobInput, sessionId: string): Promi
   }
 
   if (input.sourceType === "twitch") {
-    const provider = getTwitchProvider();
-    if (!provider.isAvailable()) {
-      throw new ApiError(
-        503,
-        "Twitch source provider is not configured on this deployment. Direct video file upload is available."
-      );
+    // TASK 014 — honest per-URL-class gate. The input URL is classified by
+    // SHAPE (no network). The capability truth for Twitch media lives in
+    // the WORKER (official Get Clips Download path under the creator's
+    // OAuth authorization, plus the per-class runtime gates), so this
+    // layer no longer 503s on the legacy "unconfigured provider" state —
+    // an unconfigured worker fails the job with a clear, permanent,
+    // actionable error instead (accurate status, no pretend import).
+    // Platform FACTS are refused here with distinct actionable 503s:
+    // VODs have NO official media-download endpoint; live streams are
+    // never completed recordings.
+    const twitchUrl = input.twitchUrl ?? input.videoUrl;
+    const kind = twitchUrl ? classifyVideoUrl(twitchUrl) : "unrecognized";
+    if (kind === "twitch-clip") {
+      await insertJob({
+        id,
+        sessionId,
+        sourceType: "twitch",
+        sourceUrl: twitchUrl,
+        requestedClips: input.clipCount,
+        clipDurationSeconds: input.clipDurationSeconds,
+        captionsEnabled: input.captionsEnabled,
+        initialStatus: "queued",
+      });
+      return { id, status: "queued", createdAt };
     }
-    // Same capability gate as YouTube (TASK 011): the official Twitch APIs
-    // (Helix) expose metadata only — no media-download endpoint — so an
-    // honest implementation reports supportsMaterialization() = false and
-    // job creation is refused with a clear, distinct message.
-    if (!provider.supportsMaterialization()) {
-      throw new ApiError(
-        503,
-        "Twitch sources cannot be materialized on this deployment: the official Twitch APIs expose metadata but no authorized media-download endpoint. Direct video file upload is available."
-      );
-    }
-    // INTEGRATION POINT (authorized provider only): a licensed ingestion
-    // path explicitly approved and wired here would materialize the VOD
-    // into private storage. None ships with this codebase.
     throw new ApiError(
       503,
-      "Twitch source provider is not configured on this deployment. Direct video file upload is available."
+      kind === "twitch-vod"
+        ? "Twitch VOD media cannot be imported: the official Twitch APIs expose no authorized VOD media-download endpoint. Export the VOD from the Twitch dashboard and upload the file directly."
+        : "This Twitch URL is a live stream, not a completed recording — wait for the VOD, or upload the file directly."
     );
+  }
+
+  if (input.sourceType === "direct_url") {
+    // TASK 014 — direct video file URL (the schema guarantees the URL
+    // classified as a public file-shaped video link). The worker downloads
+    // it through the SSRF guard, FFprobe-validates the bytes, and stores
+    // the object in the private sources bucket — the same pipeline as
+    // uploads below the provider.
+    const videoUrl = input.videoUrl;
+    await insertJob({
+      id,
+      sessionId,
+      sourceType: "direct_url",
+      sourceUrl: videoUrl,
+      requestedClips: input.clipCount,
+      clipDurationSeconds: input.clipDurationSeconds,
+      captionsEnabled: input.captionsEnabled,
+      initialStatus: "queued",
+    });
+    return { id, status: "queued", createdAt };
   }
 
   // Upload: reserved storage location; replaced by the exact generated path

@@ -474,12 +474,24 @@ def test_metadata_ok_materialization_denied_clear_message():
     assert "upload the file directly" in message
 
 
-def test_twitch_metadata_ok_materialization_denied_clear_message():
+def test_twitch_materialization_is_honest_per_url_class():
     p = TwitchProvider(config=TwitchConfig(client_id="tw-client-id-sentinel"))
     assert p.supports_validation is True
-    assert p.supports_materialization is False
+    # TASK 014: clips have an authorized path (with creator auth); the
+    # flag says "this adapter can materialize (some) Twitch URLs" and the
+    # per-URL-class refusals below keep it honest.
+    assert p.supports_materialization is True
+    # VOD: no official media endpoint — actionable refusal, NO network.
     with pytest.raises(MaterializationUnavailable) as exc:
         run(p.materialize("https://twitch.tv/videos/1", "/tmp/anywhere"))
     message = str(exc.value).lower()
     assert "official" in message
     assert "upload the file directly" in message
+    # Clip WITHOUT creator authorization: typed permanent error naming
+    # the missing configuration — and it must not touch the network.
+    with pytest.raises(UnauthorizedError) as exc:
+        run(p.materialize("https://twitch.tv/clips/SomeClip123", "/tmp/anywhere"))
+    assert "refresh token" in str(exc.value).lower()
+    # Live: never materializable (same actionable refusal as VODs).
+    with pytest.raises(MaterializationUnavailable):
+        run(p.materialize("https://twitch.tv/live/somechannel", "/tmp/anywhere"))

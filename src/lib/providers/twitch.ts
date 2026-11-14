@@ -10,17 +10,23 @@ import { ApiError } from "@/lib/api/errors";
  * licensed ingestion service). No unauthorized cookies, no private
  * endpoints, no circumvention — by design, ever.
  *
- * Capability honesty (TASK 011): the official Twitch APIs (Helix /videos,
- * /streams) expose METADATA (availability, duration, title) but NO
- * media-download endpoint. ``supportsMaterialization`` therefore reports
- * false for every honest implementation until a separately licensed
- * ingestion path is explicitly approved and wired — metadata capability
- * never implies materialization capability.
+ * Capability honesty (TASK 011 → updated by TASK 014):
+ *
+ * - VOD media: the official Twitch APIs expose NO VOD media-download
+ *   endpoint. The API refuses VOD imports with an actionable 503
+ *   (export from the dashboard, or upload the file directly).
+ * - CLIP media: TASK 014 added the official Get Clips Download path —
+ *   a creator-owned authorization (the creator's OAuth refresh token,
+ *   configured on the WORKER) that lets the worker download clips
+ *   through `GET /helix/clips/downloads`. That capability truth lives
+ *   in the worker (where the credentials are), so job creation for
+ *   CLIP URLs is no longer gated here; an unconfigured worker fails the
+ *   job with a clear, permanent, actionable error. Live streams and
+ *   VOD URLs are refused at the API with distinct 503s.
  *
  * When no authorized provider (and its credentials) is configured,
- * {@link getTwitchProvider} returns an explicitly unavailable provider and
- * the API answers with a clear 503 "provider unavailable" response while
- * direct file uploads remain fully functional.
+ * {@link getTwitchProvider} returns an explicitly unavailable provider;
+ * direct file uploads remain fully functional in every configuration.
  */
 
 export interface TwitchSourceMetadata {

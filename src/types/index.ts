@@ -1,7 +1,7 @@
 import type { ProcessingState } from "@/config/app";
 
 /** Where the source video comes from. */
-export type SourceType = "youtube" | "twitch" | "upload";
+export type SourceType = "youtube" | "twitch" | "upload" | "direct_url";
 
 /** A video file selected in the browser. UI metadata only in Phase 1. */
 export interface UploadedFileMeta {

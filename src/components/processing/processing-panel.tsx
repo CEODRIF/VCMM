@@ -91,7 +91,13 @@ export function ProcessingPanel({ job, live = false }: { job: Job; live?: boolea
           <div className="space-y-1.5">
             <CardTitle>Job {job.id}</CardTitle>
             <CardDescription>
-              {job.sourceType === "youtube" ? "YouTube source" : "Uploaded file"} · {job.requestedClips}{" "}
+              {job.sourceType === "youtube"
+                ? "YouTube source"
+                : job.sourceType === "twitch"
+                  ? "Twitch source"
+                  : job.sourceType === "direct_url"
+                    ? "Imported video link"
+                    : "Uploaded file"} · {job.requestedClips}{" "}
               {job.requestedClips === 1 ? "clip requested" : "clips requested"}
             </CardDescription>
           </div>

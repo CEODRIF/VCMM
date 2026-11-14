@@ -47,7 +47,7 @@ import { POST as POST_JOBS } from "@/app/api/v1/jobs/route";
 import { findSessionByTokenHash } from "@/lib/db/sessions";
 import { insertJob } from "@/lib/db/jobs";
 import { jobCreationRateLimiter } from "@/lib/security/rate-limit";
-import { validateTwitchUrl } from "@/lib/validation/clips";
+import { classifyVideoUrl, validateTwitchUrl } from "@/lib/validation/clips";
 
 const findSessionMock = findSessionByTokenHash as ReturnType<typeof vi.fn>;
 const insertMock = insertJob as ReturnType<typeof vi.fn>;
@@ -90,8 +90,8 @@ beforeEach(() => {
   Object.assign(twitchState, { isAvailable: false, supportsMaterialization: false });
 });
 
-describe("POST /api/v1/jobs — Twitch provider (TASK 011)", () => {
-  it("refuses Twitch jobs with a clear 503 when the provider is unconfigured", async () => {
+describe("POST /api/v1/jobs — Twitch provider (TASK 011 → TASK 014 per-class gates)", () => {
+  it("refuses Twitch VOD jobs with an actionable 503 (no official VOD media endpoint)", async () => {
     const response = await POST_JOBS(
       requestWithSession({
         sourceType: "twitch",
@@ -101,25 +101,54 @@ describe("POST /api/v1/jobs — Twitch provider (TASK 011)", () => {
     );
     expect(response.status).toBe(503);
     const body = (await response.json()) as { error?: string };
-    expect(body.error).toMatch(/twitch source provider is not configured/i);
-    // no job row may be created for an unavailable provider
+    // TASK 014: the refusal names the platform fact and the workarounds
+    // (export or direct upload) — never a pretend import.
+    expect(body.error).toMatch(/no authorized VOD media-download endpoint/i);
+    expect(body.error).toMatch(/export the VOD/i);
+    expect(body.error).toMatch(/upload the file directly/i);
+    // no job row may be created for a refused VOD
     expect(insertMock).not.toHaveBeenCalled();
   });
 
-  it("refuses with a DISTINCT 503 when metadata is available but materialization is unsupported", async () => {
-    Object.assign(twitchState, { isAvailable: true, supportsMaterialization: false });
+  it("refuses Twitch live URLs with a distinct actionable 503", async () => {
     const response = await POST_JOBS(
       requestWithSession({
         sourceType: "twitch",
-        twitchUrl: "https://twitch.tv/videos/123456789",
+        videoUrl: "https://twitch.tv/live/somechannel",
         ...clipFields,
       })
     );
     expect(response.status).toBe(503);
     const body = (await response.json()) as { error?: string };
-    expect(body.error).toMatch(/cannot be materialized/i);
-    expect(body.error).toMatch(/direct video file upload/i);
+    expect(body.error).toMatch(/live stream/i);
     expect(insertMock).not.toHaveBeenCalled();
+  });
+
+  it("creates a QUEUED job for a Twitch CLIP URL (worker imports via official Get Clips Download)", async () => {
+    for (const clipUrl of [
+      "https://clips.twitch.tv/RewolvedKleinerPinguin",
+      "https://www.twitch.tv/clips/RewolvedKleinerPinguin",
+      "https://twitch.tv/somechannel/clip/RewolvedKleinerPinguin",
+    ]) {
+      const response = await POST_JOBS(
+        requestWithSession({ sourceType: "twitch", videoUrl: clipUrl, ...clipFields })
+      );
+      expect(response.status, clipUrl).toBe(201);
+      const body = (await response.json()) as { job?: { id: string; status: string } };
+      expect(body.job?.status).toBe("queued");
+      expect(insertMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sourceType: "twitch",
+          sourceUrl: clipUrl,
+          initialStatus: "queued",
+        })
+      );
+      // reset per-iteration expectation counts
+      vi.clearAllMocks();
+      findSessionMock.mockResolvedValue({ id: SESSION_ID, expires_at: FUTURE });
+      insertMock.mockResolvedValue({ id: JOB_ID });
+      jobCreationRateLimiter.resetAll();
+    }
   });
 
   it("accepts canonical Twitch VOD URL forms (reaches the provider gate, not validation)", async () => {
@@ -266,6 +295,112 @@ describe("POST /api/v1/jobs — direct upload regression", () => {
       sourceType: "upload",
       initialStatus: "uploading",
     });
+  });
+});
+
+describe("POST /api/v1/jobs — direct video file URLs (TASK 014)", () => {
+  it("creates a QUEUED direct_url job for a public file-shaped video link", async () => {
+    for (const videoUrl of [
+      "https://storage.example.com/streams/vod.mp4",
+      "https://cdn.mygame.example/archive/clip.webm?sig=abc123",
+      "https://files.example.com/recording.mov",
+    ]) {
+      const response = await POST_JOBS(
+        requestWithSession({ sourceType: "direct_url", videoUrl, ...clipFields })
+      );
+      expect(response.status, videoUrl).toBe(201);
+      const body = (await response.json()) as { job?: { id: string; status: string } };
+      expect(body.job?.status).toBe("queued");
+      expect(insertMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sourceType: "direct_url",
+          sourceUrl: videoUrl,
+          initialStatus: "queued",
+        })
+      );
+      vi.clearAllMocks();
+      findSessionMock.mockResolvedValue({ id: SESSION_ID, expires_at: FUTURE });
+      insertMock.mockResolvedValue({ id: JOB_ID });
+      jobCreationRateLimiter.resetAll();
+    }
+  });
+
+  it("never echoes internal storage paths or signed URLs in the 201 response", async () => {
+    const response = await POST_JOBS(
+      requestWithSession({
+        sourceType: "direct_url",
+        videoUrl: "https://storage.example.com/v.mp4",
+        ...clipFields,
+      })
+    );
+    expect(response.status).toBe(201);
+    const text = JSON.stringify(await response.json());
+    expect(text).not.toContain("clipforge-sources");
+    expect(text).not.toMatch(/sources\/[^"\\]+\/original/);
+    expect(text).not.toMatch(/token=/i);
+  });
+
+  const rejectionCases: Array<[videoUrl: string | undefined, why: string]> = [
+    [undefined, "missing videoUrl"],
+    ["https://www.youtube.com/watch?v=abc", "platform URL (youtube) is not a direct file"],
+    ["https://twitch.tv/videos/123", "platform URL (twitch) is not a direct file"],
+    ["https://storage.example.com/page.html", "non-video extension"],
+    ["https://storage.example.com/playlist.m3u8", "streaming playlist is not a file"],
+    ["https://storage.example.com:8443/v.mp4", "non-standard port"],
+    ["https://user:pass@storage.example.com/v.mp4", "credentials in URL"],
+    ["not a url", "not a URL"],
+  ];
+  it.each(rejectionCases)("rejects direct_url inputs (%s) with 400", async (videoUrl) => {
+    const response = await POST_JOBS(
+      requestWithSession({ sourceType: "direct_url", videoUrl, ...clipFields })
+    );
+    expect(response.status).toBe(400);
+    expect(insertMock).not.toHaveBeenCalled();
+  });
+
+  it("requires a verified session for direct_url jobs (401 without one)", async () => {
+    const response = await POST_JOBS(
+      requestWithoutSession({
+        sourceType: "direct_url",
+        videoUrl: "https://storage.example.com/v.mp4",
+        ...clipFields,
+      })
+    );
+    expect(response.status).toBe(401);
+    expect(insertMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("classifyVideoUrl (TASK 014 shape classifier)", () => {
+  it("classifies each URL family by shape only (no network)", () => {
+    expect(classifyVideoUrl("https://www.youtube.com/watch?v=abc")).toBe("youtube");
+    expect(classifyVideoUrl("https://youtu.be/abc123")).toBe("youtube");
+    expect(classifyVideoUrl("https://twitch.tv/videos/123")).toBe("twitch-vod");
+    expect(classifyVideoUrl("https://twitch.tv/chan/videos/123")).toBe("twitch-vod");
+    expect(classifyVideoUrl("https://clips.twitch.tv/SomeClipSlug")).toBe("twitch-clip");
+    expect(classifyVideoUrl("https://twitch.tv/chan/clip/SomeClipSlug")).toBe("twitch-clip");
+    expect(classifyVideoUrl("https://twitch.tv/live/chan")).toBe("twitch-live");
+    expect(classifyVideoUrl("https://twitch.tv/chan")).toBe("twitch-live");
+    expect(classifyVideoUrl("https://storage.example.com/v.mp4")).toBe("direct-file");
+    expect(classifyVideoUrl("https://storage.example.com/a/b/c.webm?s=1")).toBe("direct-file");
+    expect(classifyVideoUrl("https://storage.example.com/v.mov")).toBe("direct-file");
+  });
+
+  it("never confuses lookalike domains with platforms (dot-boundary matching)", () => {
+    expect(classifyVideoUrl("https://not-youtube.com/watch?v=x")).toBe("unrecognized");
+    expect(classifyVideoUrl("https://youtube.com.evil.example/watch?v=x")).toBe("unrecognized");
+    expect(classifyVideoUrl("https://twitch.tv.evil.example/videos/1")).toBe("unrecognized");
+    expect(classifyVideoUrl("https://evil-twitch.tv/videos/1")).toBe("unrecognized");
+    // ...and a video file on a lookalike host IS a direct file (guard applies at transfer).
+    expect(classifyVideoUrl("https://storage.notyoutube.com/v.mp4")).toBe("direct-file");
+  });
+
+  it("rejects non-video files, non-http schemes, and non-URLs", () => {
+    expect(classifyVideoUrl("https://example.com/page.html")).toBe("unrecognized");
+    expect(classifyVideoUrl("https://example.com/playlist.m3u8")).toBe("unrecognized");
+    expect(classifyVideoUrl("ftp://example.com/v.mp4")).toBe("unrecognized");
+    expect(classifyVideoUrl("https://user:p@example.com/v.mp4")).toBe("unrecognized");
+    expect(classifyVideoUrl("not a url")).toBe("unrecognized");
   });
 });
 

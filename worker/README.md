@@ -315,12 +315,17 @@ startup (see `app/config/settings.py`):
 | `WORKER_CAPTION_MARGIN_V` | `520` | Distance of the caption block from the bottom edge (60-1500) |
 | `WORKER_CAPTION_WORDS_PER_LINE` | `3` | Consecutive words per on-screen line (1-8) |
 | `WORKER_CAPTION_UPPERCASE` | `true` | Uppercase Latin words (Arabic/CJK never transformed) |
-| `WORKER_SOURCE_PROVIDERS_ENABLED` | `true` | Phase 8 (TASK 011): master switch for provider jobs; OFF → youtube/twitch jobs fail permanently with a clear "disabled" error, uploads unaffected |
+| `WORKER_SOURCE_PROVIDERS_ENABLED` | `true` | Phase 8 (TASK 011 → TASK 014): master switch for provider jobs (youtube/twitch/direct_url); OFF → they fail permanently with a clear "disabled" error, uploads unaffected |
 | `WORKER_YOUTUBE_API_KEY` | – | Phase 8: official YouTube Data API v3 key (server-side; sent in the `X-Goog-Api-Key` header, NEVER the URL); optional — without it, keyless oEmbed metadata (partial) still works |
 | `WORKER_YOUTUBE_OAUTH_CLIENT_ID` / `_CLIENT_SECRET` / `_REFRESH_TOKEN` | – | Phase 8: OAuth user-credential flow (lets the USER's authorized context read unlisted/private metadata). All three must be set together (validated) or none. Server-side only |
 | `WORKER_YOUTUBE_OAUTH_SCOPES` | `openid` | Phase 8: minimum scopes for metadata-only access (0-500 chars, validated) |
 | `WORKER_TWITCH_CLIENT_ID` / `_CLIENT_SECRET` | – | Phase 8: official Twitch application credentials. Client id alone = Client-Id header mode (official minimum for PUBLIC VOD metadata); id + secret = app-access-token flow (client_credentials) |
 | `WORKER_TWITCH_API_BASE` / `WORKER_TWITCH_OAUTH_BASE` | official endpoints | Phase 8: overridable for tests/private mirrors |
+| `WORKER_TWITCH_OAUTH_REFRESH_TOKEN` | – | TASK 014: the **creator's** OAuth refresh token (granted by the clip's broadcaster/editor with scope `channel:manage:clips` against THIS deployment's Twitch app) — enables CLIP import through the official `GET /helix/clips/downloads` endpoint. Requires `WORKER_TWITCH_CLIENT_ID` + `_CLIENT_SECRET` (validated at startup). Without it, clip jobs fail permanently with the actionable `provider_unauthorized` message. Server-side only; travels in the token-exchange POST body ONLY (never URLs/logs) |
+| `WORKER_TWITCH_MEDIA_HOST_SUFFIXES` | `twitchcdn.net,twitch.tv,jtvnw.net` | TASK 014: the ONLY host suffixes accepted for the CDN download URLs returned by Get Clips Download (https enforced too) — any other host is refused before transfer |
+| `WORKER_DIRECT_URLS_ENABLED` | `true` | TASK 014: switch for direct video-file URL imports (`direct_url` jobs). OFF → they fail permanently with "direct video URL import is disabled … upload the file directly" |
+| `WORKER_DIRECT_URL_HOST_ALLOWLIST` | – (any public host) | TASK 014: optional comma-separated allowlist for the PASTED host (hop 0 of the redirect chain). When set, only those hosts are accepted; later redirect hops stay public-only (never private/loopback) |
+| `WORKER_DIRECT_URL_TRANSFER_DEADLINE_SECONDS` | `1800` | TASK 014: total wall-clock budget for the WHOLE download (all attempts) — defeats slow-drip sources; `0`/unset behavior: 1800 default (per-request `WORKER_PROVIDER_REQUEST_TIMEOUT_SECONDS` still applies between bytes) |
 | `WORKER_PROVIDER_REQUEST_TIMEOUT_SECONDS` | `10` | Phase 8: provider API + token-exchange timeout (0-120) |
 | `WORKER_PROVIDER_MAX_RETRIES` / `WORKER_PROVIDER_RETRY_BACKOFF_SECONDS` | `2` / `1.5` | Phase 8: bounded retries for TRANSIENT provider failures only (0-5 / 0-60) |
 | `WORKER_MATERIALIZE_MAX_SOURCE_BYTES` | `2 GiB` | Phase 8: hard cap on materialized sources (≥ 1 MiB) |
@@ -328,21 +333,22 @@ startup (see `app/config/settings.py`):
 | `WORKER_MATERIALIZE_CHUNK_BYTES` | `1 MiB` | Phase 8: streaming chunk size (64 KiB-16 MiB) — never the whole file in memory |
 | `WORKER_MATERIALIZE_MAX_DURATION_SECONDS` | – (no cap) | Phase 8: optional duration gate for materialized sources (≥ 0); default preserves the TASK 007 no-duration-cap decision |
 
-## Source providers (Phase 8, TASK 011)
+## Source providers (Phase 8, TASK 011 → universal link ingestion, TASK 014)
 
 Provider-independent source layer: the pipeline receives NORMALIZED source
 files and never learns where a source came from. Ingestion dispatches
-`upload` jobs exactly as before and routes `youtube`/`twitch` jobs through
-this layer: gate → official validation/metadata → typed failure or the
-authorized materialization path → the SAME download/probe/complete tail as
-uploads.
+`upload` jobs exactly as before and routes `youtube`/`twitch`/`direct_url`
+jobs through this layer: gate → official validation/metadata → typed failure
+or the authorized materialization path → the SAME download/probe/complete
+tail as uploads. Full behavior + security model: [docs/link-ingestion.md](../docs/link-ingestion.md).
 
 ### Supported URL formats (strict; lookalikes rejected)
 
 | Provider | Accepted forms | Rejected |
 | --- | --- | --- |
 | YouTube | `https://(www./m./music.)youtube.com/(watch?v=\|shorts/\|live/\|embed/)ID`, `https://youtu.be/ID` (ID: 11 chars `[A-Za-z0-9_-]`) | channels (`@name`), playlists, bare `/ID`, other hosts/schemes |
-| Twitch | `https://(www./m.)twitch.tv/videos/{vodId}`, `https://(www./m.)twitch.tv/{channel}/videos/{vodId}`; live/channel URLs (`/live/{channel}`, `/{channel}`) are validated (online → restricted "wait for the VOD", offline → unavailable) | non-VOD paths, lookalike hosts, other schemes |
+| Twitch | `https://(www./m.)twitch.tv/videos/{vodId}`, `https://(www./m.)twitch.tv/{channel}/videos/{vodId}`; live/channel URLs (`/live/{channel}`, `/{channel}`) are validated (online → restricted "wait for the VOD", offline → unavailable); **TASK 014 clip forms** `https://(www.)twitch.tv/clips/{slug}`, `https://(www.)twitch.tv/{channel}/clip/{slug}`, `https://clips.twitch.tv/{slug}` (VOD ids always win: `twitch.tv/clips/videos/{id}` is the VOD of a channel named "clips") | non-VOD/clip paths, lookalike hosts, other schemes |
+| Direct file URL (TASK 014) | any non-platform `http(s)` host (dot-boundary matching — `not-twitch.tv` is NOT twitch), standard ports only, no credentials, path ending `.mp4`/`.webm`/`.mov` (query strings allowed — signed links) | platform hosts (youtube.com / youtu.be / twitch.tv / clips.twitch.tv / twitchcdn.net / jtvnw.net), other extensions (`m3u8`, `mpd`, `html`…), non-standard ports, `ftp://`, credentials, control characters, loopback/private/link-local destinations (SSRF guard) |
 
 ### Capabilities — what is officially supported (be precise)
 
@@ -352,8 +358,10 @@ uploads.
 | YouTube + `WORKER_YOUTUBE_API_KEY` | **Data API v3** `videos` (snippet + contentDetails + liveStreamingDetails): duration (IS-8601), publication, creator, thumbnail, definition | completed / live / scheduled / private / rejected / processing / deleted + HTTP mapping (403→restricted, 404→deleted, 429→rate-limited, 5xx→unavailable) | **NO** (same refusal) |
 | YouTube + OAuth trio | Data API v3 under the USER's authorized context (unlisted/private readable) | as above | **NO** (same refusal) |
 | Twitch + `WORKER_TWITCH_CLIENT_ID` | **Helix** `/videos` (Client-Id header — the official minimum for public VODs): duration, created, creator, thumbnail, vod_type (archive/highlight) | completed / deleted / private (401/403) / rate-limited (429) / unavailable (5xx, malformed); live online/offline via `/streams` | **NO** — typed permanent refusal |
-| Twitch + id + secret | Helix with cached **app-access token** (client_credentials, POST body only) | as above | **NO** (same refusal) |
-| Twitch, unconfigured | **Honest unavailability, zero network calls** (never a misleading 401-based guess) | unavailable ("not configured on this deployment") | **NO** |
+| Twitch + id + secret | Helix with cached **app-access token** (client_credentials, POST body only); **clip metadata** via `/clips` (app or creator token) | as above + clip available / deleted / restricted (403) | **VOD: NO** (same refusal) — **CLIP: only with creator OAuth** (below) |
+| Twitch + creator OAuth (TASK 014: id + secret + `WORKER_TWITCH_OAUTH_REFRESH_TOKEN`) | clip metadata with the creator's user token | as above | **CLIP: YES** — official `GET /clips/downloads` (editor_id = token's user, broadcaster_id from `/clips`); https + media-host-suffix CDN URL, SSRF-guarded stream, pre-storage FFprobe. Unauthorized/expired token → permanent actionable `provider_unauthorized` (names the settings + scope); 403 → `source_rejected` (token ≠ clip owner); VOD/live URLs still get the per-class refusal |
+| Twitch, unconfigured | **Honest unavailability, zero network calls** (never a misleading 401-based guess) | unavailable ("not configured on this deployment") | **NO** (VOD + clip — with the actionable message) |
+| Direct file URL (TASK 014) | reachability probe (HEAD + bounded Range-GET fallback): status mapping 404/410→deleted, 401/403→restricted, 429→rate-limited, 5xx→unavailable | available (declared size surfaced) / deleted / restricted / rate-limited / unavailable; unsafe input → permanent `provider_invalid_url` before any network traffic | **YES** — SSRF-guarded streaming (per-hop DNS revalidation, redirect pre-resolution, size cap, wall-clock deadline, retries) → FFprobe → private bucket (`video/mp4|webm|quicktime` by extension) |
 | Upload | FFprobe on the stored object | — | **YES** (the fully implemented reference path) |
 
 **Mocked tests vs live operations.** All provider tests are deterministic and
@@ -384,6 +392,15 @@ as unsupported, not simulated.
   flow (client_credentials, cached). NO OAuth application is created or
   configured by this codebase — that is an operator action, explicit, out of
   scope.
+- **Twitch CLIP import (TASK 014)**: the clip's broadcaster (or an editor
+  they authorized) logs into Twitch → Connections → your app → grants
+  `channel:manage:clips`, and the operator records the resulting REFRESH
+  token in `WORKER_TWITCH_OAUTH_REFRESH_TOKEN` (with the app's
+  `WORKER_TWITCH_CLIENT_ID` + `_CLIENT_SECRET` — the trio is validated at
+  startup). Only then does the official `GET /clips/downloads` path work;
+  every clip import without it fails permanently with the actionable
+  `provider_unauthorized` message. VOD/live URLs are NEVER importable
+  (no official media endpoint) regardless of configuration.
 - Secrets are env-only, validated by Pydantic, empty string = not configured,
   and NEVER logged (credential-shaped text is redacted in every provider
   message; see `errors.redact`).
@@ -448,7 +465,7 @@ no failure write (lease-safe abandon).
 | Endpoint | Purpose | HTTP |
 | --- | --- | --- |
 | `GET /health` | **Liveness** — process is up (Docker `HEALTHCHECK` target). Never probes dependencies. | always 200 |
-| `GET /ready` | **Readiness** — real, bounded dependency probes (one `select` on `jobs`, one storage list, 5s each, 30s result cache). `200 {status:"ready"}` iff database ok **and** storage ok **and** ffmpeg enabled; otherwise `503 {status:"degraded", components:{...}}` naming every failing component. Missing OPTIONAL features (transcription/facecam/game_vision) are reported as `enabled`/`disabled`/`degraded` but never gate readiness. With `WORKER_WORKER_ENABLED=false` every component reports `disabled` and the endpoint is `200 ready` (API-only deployment). | 200 / 503 |
+| `GET /ready` | **Readiness** — real, bounded dependency probes (one `select` on `jobs`, one storage list, 5s each, 30s result cache). `200 {status:"ready"}` iff database ok **and** storage ok **and** ffmpeg enabled; otherwise `503 {status:"degraded", components:{...}}` naming every failing component. Missing OPTIONAL features (transcription/facecam/game_vision) are reported as `enabled`/`disabled`/`degraded` but never gate readiness. The `providers` report (TASK 014) names the real modes: `youtube` (oembed/api-key/oauth), `twitch` (`unconfigured` / `client-id` / `app-token` / `app-token+creator-oauth (clip import)`), `direct_url` (`enabled`/`disabled`), plus `master_switch`. With `WORKER_WORKER_ENABLED=false` every component reports `disabled` and the endpoint is `200 ready` (API-only deployment). | 200 / 503 |
 | `GET /metrics` | Prometheus text format (stdlib registry, `text/plain; version=0.0.4`). | 200 |
 
 Never report "ready" merely because the process started — `/ready` performs real

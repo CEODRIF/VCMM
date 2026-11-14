@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Sequence
 
 from .base import ProviderNotSupported, StreamProvider
+from .direct_url import DirectUrlConfig, DirectUrlProvider
 from .twitch import TwitchConfig, TwitchProvider
 from .upload import UploadProvider
 from .youtube import YouTubeConfig, YouTubeProvider
@@ -37,11 +38,46 @@ def _youtube_config_from(settings) -> YouTubeConfig | None:
 def _twitch_config_from(settings) -> TwitchConfig | None:
     if settings is None:
         return None
+    suffixes = tuple(
+        s.strip() for s in (settings.twitch_media_host_suffixes or "").split(",")
+        if s.strip()
+    )
     return TwitchConfig(
         client_id=settings.twitch_client_id,
         client_secret=settings.twitch_client_secret,
+        owner_refresh_token=settings.twitch_oauth_refresh_token,
         api_base=settings.twitch_api_base,
         oauth_base=settings.twitch_oauth_base,
+        media_host_suffixes=suffixes or TwitchConfig.media_host_suffixes,
+        # Transfer budgets for clip materialization (operator-controlled).
+        max_source_bytes=settings.materialize_max_source_bytes,
+        chunk_bytes=settings.materialize_chunk_bytes,
+        max_attempts=settings.provider_max_retries + 1,
+        backoff_seconds=settings.provider_retry_backoff_seconds,
+        max_redirects=settings.materialize_max_redirects,
+        transfer_deadline_seconds=settings.direct_url_transfer_deadline_seconds,
+        transfer_timeout_seconds=settings.provider_request_timeout_seconds,
+    )
+
+
+def _direct_url_config_from(settings) -> DirectUrlConfig | None:
+    if settings is None:
+        return None
+    allowlist = tuple(
+        s.strip() for s in (settings.direct_url_host_allowlist or "").split(",")
+        if s.strip()
+    )
+    return DirectUrlConfig(
+        enabled=settings.direct_urls_enabled,
+        host_allowlist=allowlist or None,
+        max_source_bytes=settings.materialize_max_source_bytes,
+        chunk_bytes=settings.materialize_chunk_bytes,
+        max_attempts=settings.provider_max_retries + 1,
+        backoff_seconds=settings.provider_retry_backoff_seconds,
+        max_redirects=settings.materialize_max_redirects,
+        transfer_deadline_seconds=settings.direct_url_transfer_deadline_seconds,
+        probe_timeout_seconds=settings.provider_request_timeout_seconds,
+        transfer_timeout_seconds=settings.provider_request_timeout_seconds,
     )
 
 
@@ -51,15 +87,26 @@ def default_providers(
     """The adapters that ship in this build.
 
     - upload: validation + materialization (fully implemented);
-    - youtube / twitch: OFFICIAL METADATA (keyless oEmbed / Helix with
-      operator credentials when configured). Materialization is refused
-      (no official media-download API exists on either platform — see
-      the adapters' docstrings and docs/ARCHITECTURE.md).
+    - youtube: OFFICIAL METADATA only — materialization refused (no
+      official media-download API; see the adapter's docstring);
+    - twitch: OFFICIAL METADATA + CLIP materialization through the
+      official Get Clips Download endpoint under the creator's OAuth
+      authorization (TASK 014). VOD/live media has no authorized
+      endpoint and is refused per-URL-class;
+    - direct_url (TASK 014): public http(s) links to video files
+      (.mp4/.webm/.mov) — SSRF-guarded streaming import; LAST in the
+      tuple so platform URLs are always claimed by their platform
+      adapter first.
     """
     return (
         UploadProvider(ffprobe_path),
         YouTubeProvider(config=_youtube_config_from(settings)),
-        TwitchProvider(config=_twitch_config_from(settings)),
+        TwitchProvider(
+            config=_twitch_config_from(settings),
+            ffprobe_path=ffprobe_path,
+        ),
+        DirectUrlProvider(ffprobe_path,
+                          config=_direct_url_config_from(settings)),
     )
 
 
