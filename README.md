@@ -99,8 +99,11 @@ Responsibilities of each component are detailed in [`docs/ARCHITECTURE.md`](docs
 │   └── requirements.txt
 ├── supabase/
 │   └── migrations/     # version-controlled SQL (not yet applied anywhere)
-├── tests/              # frontend unit tests (vitest)
-├── docs/               # ARCHITECTURE.md, ROADMAP.md
+├── tests/              # frontend unit tests (vitest) + tests/database/ (PGlite)
+├── docs/               # ARCHITECTURE.md, ROADMAP.md, video-ingestion.md,
+│                       # video-analysis.md, video-generation.md,
+│                       # storage-lifecycle.md, provider-capabilities.md,
+│                       # link-ingestion.md, stream-intelligence.md
 ├── .github/workflows/  # CI
 ├── .env.example
 └── package.json
@@ -184,8 +187,8 @@ Server-side validation is implemented in `src/lib/env.ts` (zod) and
 
 1. Create a **development** Supabase project (free tier is fine).
 2. Store the project URL and keys in your environment (see table above).
-  3. Apply the eight migrations to the development project (Supabase dashboard
-    SQL editor or Supabase CLI), in order:
+  3. Apply the fifteen migrations to the development project (Supabase dashboard
+    SQL editor or Supabase CLI), in filename order:
     - `supabase/migrations/20261113000000_initial_schema.sql` (Phase 1)
     - `supabase/migrations/20261114000000_phase2_job_settings_and_session_lookup.sql` (Phase 2)
     - `supabase/migrations/20261115000000_phase3_queue_and_ingestion.sql` (Phase 3 — queue columns, 9-state machine, restricted worker RPCs)
@@ -195,12 +198,24 @@ Server-side validation is implemented in `src/lib/env.ts` (zod) and
     - `supabase/migrations/20261120000000_phase5b_captions.sql` (Phase 5B — `clips.captions jsonb`: the clip's real word-level timings for subtitle burn-in)
     - `supabase/migrations/20261123000000_phase6_results_retention.sql` (Phase 6 — `jobs.purged_at` marker + retention trigger: 30 days after a terminal transition, only when `expires_at` is NULL)
     - `supabase/migrations/20261124000000_phase7_stream_intelligence.sql` (Phase 7 — `processing_checkpoints` + `candidate_events` (worker-owned, deny-by-default RLS, exact retry dedup) and `jobs.source_type` += 'twitch' (additive))
+    - `supabase/migrations/20261125000000_phase7b_intel_integration.sql` (Phase 7B — intel resume/requeue integration)
+    - `supabase/migrations/20261126000000_task14_universal_link_source.sql` (TASK 014 — `jobs.source_type` += 'direct_url', direct-URL source invariants)
+    - `supabase/migrations/20261127000000_task15_kick_source.sql` (TASK 015 P1 — `jobs.source_type` += 'kick' (metadata-only source; the service never inserts kick jobs without an authorized media path))
+    - `supabase/migrations/20261128000000_task15_analysis_timeline.sql` (TASK 015 P2 — `analysis_timeline`: full-timeline coverage bookkeeping, window invariants)
+    - `supabase/migrations/20261129000000_task15_generation_modes.sql` (TASK 015 P3 — `jobs.generation_mode`/`output_fps`/`requested_clips`, NULL-safe mode⇔count invariant, `clips.mode`, clip-duration bounds 5..3600)
+    - `supabase/migrations/20261130000000_task15_results_actions.sql` (TASK 015 P4 — measured clip metadata columns, `clips.status` += 'deleting', `jobs.cleanup_error`)
 
-All nine are executed and asserted against a real PostgreSQL 16 engine (WASM)
-in the test suite (`tests/database/rls.test.ts`, `tests/database/queue.test.ts`,
+All fifteen are executed and asserted against a real PostgreSQL engine (WASM,
+PGlite) in the test suite (`tests/database/rls.test.ts`, `tests/database/queue.test.ts`,
 `tests/database/phase4-queue.test.ts`, `tests/database/storage-buckets.test.ts`,
 `tests/database/phase5-rendering.test.ts`, `tests/database/phase5b-captions.test.ts`,
-`tests/database/phase6-retention.test.ts`, `tests/database/phase7-intel.test.ts`),
+`tests/database/phase6-retention.test.ts`, `tests/database/phase7-intel.test.ts`,
+`tests/database/phase7b-integration.test.ts`, `tests/database/task14-universal-link.test.ts`,
+`tests/database/task15-analysis-timeline.test.ts`, `tests/database/task15-generation-modes.test.ts`,
+`tests/database/task15-results-actions.test.ts`,
+`tests/database/task15-migration-order.test.ts` — the last proves the clean
+install of all 15 files in order AND the upgrade path from the TASK 014
+end-state applying only the four TASK 015 migrations, idempotently),
 including deny-by-default RLS, the queue RPCs' atomicity/lease semantics, the
 Phase 4 stage transitions (incl. crash recovery and the parked state), the
 Phase 5 rendering lifecycle (parked claim → rendering, render-retry requeue,
@@ -398,6 +413,20 @@ pull requests:
   reset on restart; the database remains the system of record. Alerting on
   the metrics is not wired yet (Phase 8) — scrape `/metrics` and `/ready`
   with any pull-based monitor.
+- TASK 015: YouTube / Twitch VOD / Kick are **metadata-only by design**
+  (no authorized media-download endpoints are used — no yt-dlp, no
+  cookies, no bypass). The product path for those platforms is export +
+  manual upload (or, for Twitch, creator-authorized clip import). See
+  [docs/provider-capabilities.md](docs/provider-capabilities.md).
+- TASK 015: Gemini is optional. Without `WORKER_GEMINI_API_KEYS` the
+  timeline is built from measured local signals + transcript (per-window
+  `not_configured` state, zero network calls) and Viral Highlights still
+  works; the UI does not currently surface a per-window "AI unavailable"
+  notice — the job simply completes with the local-signal clip set.
+- TASK 015: orphan/expiry storage cleanup is a **manual, bounded CLI**
+  (`python -m app.cleanup [--orphans]`) — deliberately no background
+  scheduler (matches the existing Phase 6 architecture); see
+  [docs/storage-lifecycle.md](docs/storage-lifecycle.md).
 
 ## Roadmap
 

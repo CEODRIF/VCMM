@@ -234,6 +234,25 @@ objects are no-ops and the marker is finally set. A job is never marked
 purged while its objects still exist. Jobs without an `expires_at` (created
 before the migration) are never purged — no guessed retention period.
 
+### Orphan cleanup (TASK 015 P4) — also manual, bounded
+
+```bash
+python -m app.cleanup --orphans [--orphan-grace-minutes 60]
+```
+
+Scans ONLY the two private buckets, ONLY the canonical
+`clips/{job}/…` / `sources/{job}/original/…` shapes, and deletes an object
+only when ALL of: the shape is canonical, the owner row is verified ABSENT
+(clip `(job_id, id)` / job row — a failing DB check treats the object as
+PRESENT), and it is older than the grace window (default 60 min — in-flight
+signed-URL downloads live ≤ 900 s but the owner row protects them anyway).
+One job directory per bucket per run at the minimum limit → bounded and
+resumable. It never touches active job inputs, rendering/uploading clips,
+or any unrelated object; object paths + outcomes are logged, never secrets
+or signed URLs. User-initiated deletions go through the API
+(`DELETE …/clips/[clipId]`, `POST …/cleanup`) — see
+`docs/storage-lifecycle.md`.
+
 ## Configuration
 
 All settings use the `WORKER_` env prefix and are validated by Pydantic at
@@ -324,6 +343,7 @@ startup (see `app/config/settings.py`):
 | `WORKER_TWITCH_OAUTH_REFRESH_TOKEN` | – | TASK 014: the **creator's** OAuth refresh token (granted by the clip's broadcaster/editor with scope `channel:manage:clips` against THIS deployment's Twitch app) — enables CLIP import through the official `GET /helix/clips/downloads` endpoint. Requires `WORKER_TWITCH_CLIENT_ID` + `_CLIENT_SECRET` (validated at startup). Without it, clip jobs fail permanently with the actionable `provider_unauthorized` message. Server-side only; travels in the token-exchange POST body ONLY (never URLs/logs) |
 | `WORKER_TWITCH_MEDIA_HOST_SUFFIXES` | `twitchcdn.net,twitch.tv,jtvnw.net` | TASK 014: the ONLY host suffixes accepted for the CDN download URLs returned by Get Clips Download (https enforced too) — any other host is refused before transfer |
 | `WORKER_DIRECT_URLS_ENABLED` | `true` | TASK 014: switch for direct video-file URL imports (`direct_url` jobs). OFF → they fail permanently with "direct video URL import is disabled … upload the file directly" |
+| `WORKER_SOURCE_RETENTION` | `keep` | TASK 015 P4: `keep` (default — source stays until cleanup/purge) or `delete_on_complete` (the source object is deleted + verified absent ONLY after every clip is `ready`+stored and the DB accepted completion; a failed source deletion warns but never fails the finished job). Plain config — no production-secret changes. Generated clips are in a separate bucket and are unaffected |
 | `WORKER_DIRECT_URL_HOST_ALLOWLIST` | – (any public host) | TASK 014: optional comma-separated allowlist for the PASTED host (hop 0 of the redirect chain). When set, only those hosts are accepted; later redirect hops stay public-only (never private/loopback) |
 | `WORKER_DIRECT_URL_TRANSFER_DEADLINE_SECONDS` | `1800` | TASK 014: total wall-clock budget for the WHOLE download (all attempts) — defeats slow-drip sources; `0`/unset behavior: 1800 default (per-request `WORKER_PROVIDER_REQUEST_TIMEOUT_SECONDS` still applies between bytes) |
 | `WORKER_KICK_API_KEY` | – | TASK 015: official Kick public API key (server-side only; sent in the `Authorization: APIKey …` header, NEVER the URL, never logged). Optional — without it, Kick URLs report honest unavailability with NO network call. **The key enables METADATA only**: Kick exposes no official VOD media-download endpoint, so Kick media is refused by design (export from Kick Studio, or upload) |
@@ -372,6 +392,8 @@ tail as uploads. Full behavior + security model: [docs/link-ingestion.md](../doc
 | Twitch + id + secret | Helix with cached **app-access token** (client_credentials, POST body only); **clip metadata** via `/clips` (app or creator token) | as above + clip available / deleted / restricted (403) | **VOD: NO** (same refusal) — **CLIP: only with creator OAuth** (below) |
 | Twitch + creator OAuth (TASK 014: id + secret + `WORKER_TWITCH_OAUTH_REFRESH_TOKEN`) | clip metadata with the creator's user token | as above | **CLIP: YES** — official `GET /clips/downloads` (editor_id = token's user, broadcaster_id from `/clips`); https + media-host-suffix CDN URL, SSRF-guarded stream, pre-storage FFprobe. Unauthorized/expired token → permanent actionable `provider_unauthorized` (names the settings + scope); 403 → `source_rejected` (token ≠ clip owner); VOD/live URLs still get the per-class refusal |
 | Twitch, unconfigured | **Honest unavailability, zero network calls** (never a misleading 401-based guess) | unavailable ("not configured on this deployment") | **NO** (VOD + clip — with the actionable message) |
+| Kick + `WORKER_KICK_API_KEY` (TASK 015) | **official public API** (`api.kick.com/public/v1`): channel info + VOD listing (duration, title, thumbnail, view counts) | available / channel-or-VOD-deleted (404) / rate-limited (429) / unavailable (5xx, malformed); unconfigured → honest unavailable, **zero network calls** | **NO** — Kick exposes no official VOD media-download endpoint (and VODs expire 14-30 days after the broadcast): typed permanent `materialization_unsupported`, "export from Kick Studio and upload, or paste a public link to the video file" |
+| Kick, unconfigured | no calls | unavailable ("Kick API key is not configured on this deployment (WORKER_KICK_API_KEY)…") | **NO** |
 | Direct file URL (TASK 014) | reachability probe (HEAD + bounded Range-GET fallback): status mapping 404/410→deleted, 401/403→restricted, 429→rate-limited, 5xx→unavailable | available (declared size surfaced) / deleted / restricted / rate-limited / unavailable; unsafe input → permanent `provider_invalid_url` before any network traffic | **YES** — SSRF-guarded streaming (per-hop DNS revalidation, redirect pre-resolution, size cap, wall-clock deadline, retries) → FFprobe → private bucket (`video/mp4|webm|quicktime` by extension) |
 | Upload | FFprobe on the stored object | — | **YES** (the fully implemented reference path) |
 
