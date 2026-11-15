@@ -132,13 +132,24 @@ class SupabaseClipStore:
         clip_id: str,
         status: str,
         storage_path: str | None = None,
+        *,
+        width: int | None = None,
+        height: int | None = None,
+        output_fps: float | None = None,
+        file_size_bytes: int | None = None,
     ) -> bool:
-        """Moves ONE clip of ONE job to ``status`` (optionally setting ``storage_path``).
+        """Moves ONE clip of ONE job to ``status`` (optionally setting
+        ``storage_path`` and the MEASURED output metadata).
 
         The update is scoped to ``(id, job_id)`` — a stale worker can never
         mark another job's clip. Returns True when a row was updated, False
         when the clip no longer exists or is no longer owned (the caller
         must then treat it as lost ownership and abort).
+
+        TASK 015 P4: ``width``/``height``/``output_fps``/``file_size_bytes``
+        are the ffprobe-verified measurements (written together with
+        ``ready`` so a rendered row is never served with guessed media
+        values). None = not provided (column stays NULL).
         """
         uuid_job = _as_job_uuid(job_id)
         if not _UUID_RE.match(str(clip_id or "")):
@@ -148,6 +159,14 @@ class SupabaseClipStore:
         values: dict[str, Any] = {"status": status}
         if storage_path is not None:
             values["storage_path"] = storage_path
+        if width is not None:
+            values["width"] = int(width)
+        if height is not None:
+            values["height"] = int(height)
+        if output_fps is not None:
+            values["output_fps"] = float(output_fps)
+        if file_size_bytes is not None:
+            values["file_size_bytes"] = int(file_size_bytes)
         try:
             result = await (
                 self._client.table(CLIPS_TABLE)

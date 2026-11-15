@@ -109,6 +109,18 @@ class Settings(BaseSettings):
     #: the source-preserved selection no longer uses it.
     render_fps_high_source_threshold: float = Field(default=55.0, gt=0, le=120)
 
+    # --- TASK 015 P4: source retention policy --------------------------------
+    #: What happens to the job's SOURCE object once rendering has COMPLETED
+    #: (the DB refuses completion unless every clip is ready + stored, so
+    #: deleting the source here can never strand an unfinished render):
+    #:   "keep"               — never delete; the Phase 6 purge (30 days
+    #:                          after a terminal state) reclaims it. DEFAULT.
+    #:   "delete_on_complete" — delete the temporary source copy immediately
+    #:                          after successful generation; generated clips
+    #:                          are in a separate bucket and are unaffected.
+    #: Configured by plain setting (no production-secret change required).
+    source_retention: Literal["keep", "delete_on_complete"] = "keep"
+
     # --- Phase 5B: caption style (burned-in animated subtitles) ----------------
     #: Font family passed to libass (resolved by fontconfig; deterministic
     #: fallback = the system default). No ASS markup characters allowed.

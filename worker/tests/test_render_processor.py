@@ -88,13 +88,16 @@ class FakeQueue:
 
 
 class FakeStorage:
-    def __init__(self, content: bytes, download_error=False, upload_error=False, upload_error_paths=()):
+    def __init__(self, content: bytes, download_error=False, upload_error=False, upload_error_paths=(),
+                 delete_error=False):
         self.content = content
         self.download_error = download_error
         self.upload_error = upload_error
         self.upload_error_paths = set(upload_error_paths)
         self.download_calls: list[tuple[str, Path]] = []
         self.uploads: list[tuple[str, int]] = []  # (object_path, bytes at upload time)
+        self.deletes: list[str] = []
+        self.delete_error = delete_error
 
     async def download_to(self, object_path: str, destination: Path) -> int:
         self.download_calls.append((object_path, destination))
@@ -110,6 +113,16 @@ class FakeStorage:
         self.uploads.append((object_path, size))
         return size
 
+    async def delete_object(self, object_path: str, *, source: bool = True) -> bool:
+        # TASK 015 P4 fake: records the deletion; honours the failure flag.
+        if self.delete_error:
+            raise StorageDownloadError("delete failed")
+        self.deletes.append(object_path)
+        return True
+
+    async def object_exists(self, object_path: str, *, source: bool = True):
+        return object_path not in self.deletes
+
 
 class FakeClipStore:
     def __init__(self, clips: Optional[list[dict[str, Any]]] = None, list_error=False, mark_error=False):
@@ -118,6 +131,7 @@ class FakeClipStore:
         self.mark_error = mark_error
         self.list_calls: list[str] = []
         self.marks: list[tuple[str, str, str, Optional[str]]] = []  # (job, clip, status, path)
+        self.mark_meta: list[dict] = []  # TASK 015 P4: measured metadata written with 'ready'
 
     async def list_clips(self, job_id: str) -> list[dict[str, Any]]:
         self.list_calls.append(job_id)
@@ -125,10 +139,13 @@ class FakeClipStore:
             raise ClipsPersistenceError("list failed")
         return [dict(c) for c in self.clips]
 
-    async def mark_clip(self, job_id: str, clip_id: str, status: str, storage_path: Optional[str] = None) -> bool:
+    async def mark_clip(self, job_id: str, clip_id: str, status: str, storage_path: Optional[str] = None,
+                        **meta) -> bool:
         if self.mark_error:
             raise ClipsPersistenceError("mark failed")
         self.marks.append((job_id, clip_id, status, storage_path))
+        if meta:
+            self.mark_meta.append(meta)
         for clip in self.clips:
             if clip["id"] == clip_id and clip["job_id"] == job_id:
                 clip["status"] = status

@@ -186,6 +186,31 @@ class RenderProcessor:
                 logger.warning("job %s: completion refused (lease lost or clip state mismatch); abandoning", job_id)
                 return
             logger.info("job %s rendering complete: %d clip(s) rendered and stored", job_id, len(clips))
+
+            # TASK 015 P4 — source retention policy. Reached ONLY after the
+            # DB accepted completion (every clip ready + stored), so the
+            # source is never removed while a render still depends on it.
+            # Clips live in a separate bucket and are unaffected. A failed
+            # deletion is a warning, not a job failure: the artifacts are
+            # complete and the Phase 6 purge still reclaims the source on
+            # its schedule (no spend, no secret changes — plain setting).
+            if self._settings.source_retention == "delete_on_complete":
+                source_path = job.get("source_path")
+                if isinstance(source_path, str) and source_path:
+                    try:
+                        deleted = await self._storage.delete_object(source_path, source=True)
+                        if deleted:
+                            logger.info("job %s: source object deleted per retention policy", job_id)
+                        else:
+                            logger.warning(
+                                "job %s: source deletion NOT verified; Phase 6 purge remains the backstop",
+                                job_id,
+                            )
+                    except Exception:  # noqa: BLE001 — retention is best-effort
+                        logger.warning(
+                            "job %s: source deletion failed; Phase 6 purge remains the backstop",
+                            job_id, exc_info=True,
+                        )
         except LeaseLostError:
             logger.warning("job %s: lease lost during rendering; abandoning", job_id)
         except asyncio.CancelledError:
@@ -254,7 +279,7 @@ class RenderProcessor:
                     await self._clip_store.mark_clip(job_id, clip_id, "processing")
                     await self._renderer.render(str(destination), start, end, spec, str(out_file))
                     try:
-                        await verify_render_output(
+                        info = await verify_render_output(
                             self._settings.ffprobe_path,
                             out_file,
                             profile,
@@ -273,7 +298,21 @@ class RenderProcessor:
                 except StorageUploadError:
                     out_file.unlink(missing_ok=True)
                     raise
-                marked = await self._clip_store.mark_clip(job_id, clip_id, "ready", storage_path=object_path)
+                # TASK 015 P4: persist the MEASURED output contract together
+                # with `ready` — ffprobe already verified all of these.
+                # (verify_render_output returns a RenderOutput on success in
+                # production; None only happens with test stubs — the columns
+                # stay NULL and the UI shows "—", never a guessed value.)
+                meta: dict[str, Any] = {}
+                if info is not None:
+                    meta = {
+                        "width": info.width, "height": info.height,
+                        "output_fps": round(info.fps, 3),
+                        "file_size_bytes": info.file_size_bytes,
+                    }
+                marked = await self._clip_store.mark_clip(
+                    job_id, clip_id, "ready", storage_path=object_path, **meta,
+                )
                 out_file.unlink(missing_ok=True)
                 if not marked:
                     raise LeaseLostError("clip completion update rejected (lease lost)")
