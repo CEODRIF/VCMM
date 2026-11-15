@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 
 import { CreationForm } from "@/components/create/creation-form";
+import { PageHeader } from "@/components/page-header";
 
 export const metadata: Metadata = {
   title: "Create",
@@ -9,13 +10,11 @@ export const metadata: Metadata = {
 
 export default function CreatePage() {
   return (
-    <div className="container py-12">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold tracking-tight">Create clips</h1>
-        <p className="mt-2 text-muted-foreground">
-          Add a source, pick your clip settings, and start creating.
-        </p>
-      </div>
+    <div className="container py-10 sm:py-12">
+      <PageHeader
+        title="Create clips"
+        description="Add a source, pick your clip settings, and start creating."
+      />
       <CreationForm />
     </div>
   );

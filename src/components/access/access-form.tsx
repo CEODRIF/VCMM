@@ -85,12 +85,12 @@ export function AccessForm() {
   }
 
   return (
-    <Card className="card-surface mx-auto w-full max-w-md animate-fade-in">
-      <CardHeader>
-        <div className="mb-2 flex h-10 w-10 items-center justify-center rounded-lg bg-accent text-accent-foreground">
-          <KeyRound size={18} />
+    <Card className="card-surface mx-auto w-full max-w-md animate-fade-in rounded-2xl">
+      <CardHeader className="pb-5">
+        <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-primary/90 to-primary/50 text-primary-foreground shadow-lg shadow-primary/25">
+          <KeyRound size={19} />
         </div>
-        <CardTitle>Enter your access code</CardTitle>
+        <CardTitle className="text-xl">Enter your access code</CardTitle>
         <CardDescription>
           ClipForge AI is private. Use the shared access code to continue.
         </CardDescription>

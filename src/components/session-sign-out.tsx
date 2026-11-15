@@ -27,9 +27,10 @@ export function SessionSignOut() {
       type="button"
       onClick={signOut}
       disabled={busy}
-      className="inline-flex items-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
+      aria-label="Sign out"
+      className="inline-flex h-9 items-center gap-1.5 rounded-xl px-3 text-[13px] font-medium text-muted-foreground transition-all duration-200 ease-premium hover:bg-accent hover:text-accent-foreground active:scale-[0.97] disabled:opacity-50 sm:text-sm"
     >
-      <LogOut size={14} /> Sign out
+      <LogOut size={15} /> <span className="hidden sm:inline">Sign out</span>
     </button>
   );
 }

@@ -9,17 +9,19 @@ export function Hero() {
   return (
     <section className="relative overflow-hidden">
       <div className="glow-primary pointer-events-none absolute inset-0" aria-hidden />
-      <div className="container relative flex flex-col items-center gap-8 py-24 text-center sm:py-32">
-        <Badge variant="accent" className="animate-fade-in">
-          {appConfig.output.aspectRatio} vertical clips · {appConfig.output.resolutionLabel}
-        </Badge>
+      <div className="container relative flex flex-col items-center gap-7 py-24 text-center sm:py-32">
+        <span className="glass animate-fade-in rounded-full px-1.5 py-1">
+          <Badge variant="accent">
+            {appConfig.output.aspectRatio} vertical clips · {appConfig.output.resolutionLabel}
+          </Badge>
+        </span>
 
         <h1
-          className="max-w-3xl animate-fade-in text-4xl font-bold tracking-tight sm:text-6xl"
+          className="max-w-3xl animate-fade-in-up text-4xl font-semibold leading-[1.08] tracking-tight sm:text-6xl"
           style={{ animationDelay: "60ms" }}
         >
           Turn long videos into short clips that{" "}
-          <span className="bg-gradient-to-r from-primary to-accent-foreground bg-clip-text text-transparent">
+          <span className="bg-gradient-to-r from-primary via-accent-foreground to-primary bg-clip-text text-transparent">
             stop the scroll
           </span>
         </h1>

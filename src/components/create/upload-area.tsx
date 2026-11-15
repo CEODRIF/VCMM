@@ -62,16 +62,16 @@ export function UploadArea({ file, onFileSelected, onFileCleared, error, disable
           acceptFile(event.dataTransfer.files?.[0]);
         }}
         className={cn(
-          "flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed px-6 py-10 text-center transition-colors",
+          "flex flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed px-6 py-10 text-center transition-all duration-200 ease-premium",
           disabled
             ? "cursor-not-allowed border-input opacity-70"
             : dragActive
-              ? "cursor-pointer border-primary bg-primary/10"
-              : "cursor-pointer border-input bg-background/40 hover:border-primary/50",
+              ? "cursor-pointer border-primary bg-primary/10 shadow-lg shadow-primary/10"
+              : "cursor-pointer border-input bg-background/40 hover:border-primary/50 hover:bg-background/70",
           error && "border-destructive"
         )}
       >
-        <span className="flex h-11 w-11 items-center justify-center rounded-full bg-accent text-accent-foreground">
+        <span className="glass flex h-12 w-12 items-center justify-center rounded-2xl text-accent-foreground">
           {file ? <FileVideo size={20} /> : <Upload size={20} />}
         </span>
         {file ? (

@@ -4,12 +4,12 @@ import { appConfig } from "@/config/app";
 
 export function SiteFooter() {
   return (
-    <footer className="border-t bg-background">
-      <div className="container flex flex-col items-center justify-between gap-4 py-8 sm:flex-row">
+    <footer className="mt-auto border-t border-border/60 bg-background/60">
+      <div className="container flex flex-col items-center justify-between gap-4 py-8 text-center sm:flex-row sm:text-left">
         <p className="text-sm text-muted-foreground">
-          {appConfig.name} — Phase 1 foundation. Video processing is not connected yet.
+          {appConfig.name} — long-form video in, platform-ready vertical clips out.
         </p>
-        <nav className="flex items-center gap-4 text-sm" aria-label="Footer">
+        <nav className="flex items-center gap-5 text-sm" aria-label="Footer">
           <Link href="/create" className="text-muted-foreground transition-colors hover:text-foreground">
             Create
           </Link>

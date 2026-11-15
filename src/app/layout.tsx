@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 
 import { SiteFooter } from "@/components/site-footer";
@@ -11,6 +11,10 @@ const inter = Inter({
   variable: "--font-sans",
   display: "swap",
 });
+
+export const viewport: Viewport = {
+  themeColor: "#0a0a10",
+};
 
 export const metadata: Metadata = {
   title: {

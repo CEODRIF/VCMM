@@ -16,7 +16,7 @@ export function Features() {
   return (
     <section id="how-it-works" className="container py-20">
       <div className="mx-auto mb-12 max-w-2xl text-center">
-        <h2 className="text-3xl font-bold tracking-tight">Everything a short-form workflow needs</h2>
+        <h2 className="text-3xl font-semibold tracking-tight">Everything a short-form workflow needs</h2>
         <p className="mt-3 text-muted-foreground">
           A focused pipeline: add a source, let the AI find the moments, and download
           platform-ready clips.
@@ -24,16 +24,19 @@ export function Features() {
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {appConfig.features.map((feature) => {
+        {appConfig.features.map((feature, index) => {
           const Icon = ICONS[feature.icon] ?? Sparkles;
           return (
-            <Card key={feature.title} className="card-surface transition-colors hover:border-primary/40">
-              <CardContent className="flex flex-col gap-3 p-6">
-                <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent text-accent-foreground">
-                  <Icon size={18} />
+            <Card
+              key={feature.title}
+              className="card-surface hover-lift animate-fade-in rounded-2xl border-border/70 hover:border-primary/30"
+            >
+              <CardContent className="flex flex-col gap-3 p-6" style={{ animationDelay: `${index * 60}ms` }}>
+                <span className="glass flex h-10 w-10 items-center justify-center rounded-xl text-accent-foreground">
+                  <Icon size={18} strokeWidth={1.75} />
                 </span>
-                <h3 className="font-semibold">{feature.title}</h3>
-                <p className="text-sm text-muted-foreground">{feature.description}</p>
+                <h3 className="font-semibold tracking-tight">{feature.title}</h3>
+                <p className="text-sm leading-relaxed text-muted-foreground">{feature.description}</p>
               </CardContent>
             </Card>
           );
@@ -42,7 +45,7 @@ export function Features() {
 
       <div className="mx-auto mt-16 grid max-w-3xl gap-4 sm:grid-cols-3">
         {[
-          { step: "1", title: "Add a source", body: "Paste a YouTube URL or drop a video file." },
+          { step: "1", title: "Add a source", body: "Paste a video link or upload a file — the pipeline takes it from there." },
           { step: "2", title: "AI finds the moments", body: "Transcription and analysis pick the strongest clips." },
           { step: "3", title: "Download ready clips", body: "Vertical 1080p clips with animated subtitles." },
         ].map((item) => (

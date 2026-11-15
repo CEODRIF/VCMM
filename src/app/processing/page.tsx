@@ -1,8 +1,11 @@
 import type { Metadata } from "next";
+import Link from "next/link";
+import { Clapperboard, Film } from "lucide-react";
 
 import { LiveJobPanel } from "@/components/processing/live-job-panel";
-import { ProcessingPanel } from "@/components/processing/processing-panel";
-import type { Job } from "@/types";
+import { PageHeader } from "@/components/page-header";
+import { buttonVariants } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 
 export const metadata: Metadata = {
   title: "Processing",
@@ -11,38 +14,56 @@ export const metadata: Metadata = {
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// DEVELOPMENT PLACEHOLDER DATA — typed sample job for the overview view.
-// Real jobs are shown via ?job=<id> (LiveJobPanel), which polls the API.
-const PLACEHOLDER_JOB: Job = {
-  id: "dev-0001",
-  sourceType: "youtube",
-  sourceUrl: "https://youtube.com/watch?v=placeholder",
-  requestedClips: 3,
-  status: "rendering",
-  progress: 64,
-  createdAt: "2026-11-13T00:00:00.000Z",
-};
+/**
+ * TASK 016 — the overview no longer shows a fake "dev-0001" job. Without a
+ * ?job=<id> parameter there is simply no job to show: an honest empty state
+ * with the next action (Create) instead of placeholder data.
+ */
+function EmptyJobState() {
+  return (
+    <Card className="card-surface animate-fade-in">
+      <CardContent className="flex flex-col items-center gap-4 py-16 text-center">
+        <span className="glass flex h-14 w-14 items-center justify-center rounded-2xl text-muted-foreground">
+          <Clapperboard size={24} strokeWidth={1.5} aria-hidden />
+        </span>
+        <div>
+          <h2 className="text-base font-semibold tracking-tight">No job selected</h2>
+          <p className="mx-auto mt-1.5 max-w-sm text-sm leading-relaxed text-muted-foreground">
+            When a video job is created, its live status appears here — each pipeline
+            stage, in real time, until the clips are ready.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center justify-center gap-3">
+          <Link href="/create" className={buttonVariants({ size: "lg" })}>
+            <Film size={16} aria-hidden /> Create your first video
+          </Link>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
 
 export default function ProcessingPage({
   searchParams,
 }: {
   searchParams: { job?: string };
 }) {
-  const jobId = typeof searchParams.job === "string" && UUID_PATTERN.test(searchParams.job)
-    ? searchParams.job
-    : null;
+  const jobId =
+    typeof searchParams.job === "string" && UUID_PATTERN.test(searchParams.job)
+      ? searchParams.job
+      : null;
 
   return (
-    <div className="container py-12">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold tracking-tight">Processing</h1>
-        <p className="mt-2 text-muted-foreground">
-          {jobId
+    <div className="container py-10 sm:py-12">
+      <PageHeader
+        title="Processing"
+        description={
+          jobId
             ? "Live status for your job."
-            : "Your video moves through the pipeline, one stage at a time."}
-        </p>
-      </div>
-      {jobId ? <LiveJobPanel jobId={jobId} /> : <ProcessingPanel job={PLACEHOLDER_JOB} />}
+            : "Your video moves through the pipeline, one stage at a time."
+        }
+      />
+      {jobId ? <LiveJobPanel jobId={jobId} /> : <EmptyJobState />}
     </div>
   );
 }

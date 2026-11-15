@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  Check,
   CheckCircle2,
   Clapperboard,
   FileAudio,
@@ -73,11 +74,10 @@ const STATE_META: Record<ProcessingState, StateMeta> = {
 };
 
 /**
- * Processing state UI (presentational).
+ * Processing state UI (presentational) — TASK 016: live jobs only.
  *
- * Used for two kinds of data:
- *   - `live` = true: a real job fetched from /api/v1/jobs/[id] (Phase 2);
- *   - `live` = false: typed placeholder data for development (Phase 1).
+ * The development placeholder job was removed: without a real
+ * ?job=<id> the overview shows an honest empty state instead.
  */
 
 function formatDuration(totalSeconds: number): string {
@@ -114,7 +114,7 @@ function clipCountLabel(job: Job): string {
   return "clips requested";
 }
 
-export function ProcessingPanel({ job, live = false }: { job: Job; live?: boolean }) {
+export function ProcessingPanel({ job }: { job: Job }) {
   const meta = STATE_META[job.status];
   const Icon = meta.icon;
   const stateIndex = appConfig.processingStates.indexOf(job.status);
@@ -152,7 +152,7 @@ export function ProcessingPanel({ job, live = false }: { job: Job; live?: boolea
       <Card className="card-surface animate-fade-in">
         <CardHeader className="flex flex-row items-start justify-between space-y-0">
           <div className="space-y-1.5">
-            <CardTitle>Job {job.id}</CardTitle>
+             <CardTitle title={job.id}>Job {job.id.slice(0, 8)}…</CardTitle>
             <CardDescription>
               {job.sourceType === "youtube"
                 ? "YouTube source"
@@ -193,13 +193,13 @@ export function ProcessingPanel({ job, live = false }: { job: Job; live?: boolea
           </div>
 
           {job.status === "failed" && job.errorMessage && (
-            <p className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive" role="alert">
+            <p className="rounded-xl border border-destructive/40 bg-destructive/10 p-3.5 text-sm text-destructive" role="alert">
               {job.errorMessage}
             </p>
           )}
 
           {settingsRows.length > 0 && (
-            <div className="flex flex-col gap-1 rounded-md border bg-background/40 p-3 text-xs text-muted-foreground">
+            <div className="flex flex-col gap-1 rounded-xl border bg-background/40 p-3.5 text-xs text-muted-foreground">
               <p className="font-medium text-foreground">Job settings</p>
               {settingsRows.map((row) => (
                 <p key={row}>{row}</p>
@@ -219,23 +219,24 @@ export function ProcessingPanel({ job, live = false }: { job: Job; live?: boolea
             </div>
           )}
 
-          {live ? (
-            <div className="flex flex-col gap-1 rounded-md border bg-background/40 p-3 text-xs text-muted-foreground">
-              <p className="font-medium text-foreground">Live job status</p>
-              <p>
-                Fetched from your session via GET /api/v1/jobs/{`[id]`}. The worker picks this job
-                up in Phase 3 (queue) and progresses it through the pipeline in Phases 4-5.
-              </p>
-            </div>
-          ) : (
-            <div className="flex flex-col gap-1 rounded-md border bg-background/40 p-3 text-xs text-muted-foreground">
-              <p className="font-medium text-foreground">Development placeholder</p>
-              <p>
-                This job is typed sample data for UI development. Create a real job from the
-                Create page to see live status.
-              </p>
-            </div>
-          )}
+          <div className="flex items-start gap-2.5 rounded-xl border bg-background/40 p-3.5 text-xs text-muted-foreground">
+            <span
+              aria-hidden
+              className={cn(
+                "mt-0.5 h-2 w-2 shrink-0 rounded-full",
+                job.status === "failed"
+                  ? "bg-destructive"
+                  : job.status === "completed"
+                    ? "bg-emerald-400"
+                    : "animate-pulse-soft bg-primary"
+              )}
+            />
+            <p>
+              <span className="font-medium text-foreground">Live job status</span> — fetched from
+              your session and refreshed automatically. The worker progresses the job through the
+              pipeline; nothing here is simulated.
+            </p>
+          </div>
         </CardContent>
       </Card>
 
@@ -245,31 +246,54 @@ export function ProcessingPanel({ job, live = false }: { job: Job; live?: boolea
           <CardDescription>All nine supported states (ingestion + product pipeline).</CardDescription>
         </CardHeader>
         <CardContent>
-          <ol className="flex flex-col gap-1">
-            {appConfig.processingStates.map((state, index) => {
-              const stateMeta = STATE_META[state];
-              const StateIcon = stateMeta.icon;
-              const isCurrent = state === job.status;
-              const isPast = index < stateIndex && job.status !== "failed";
-              const isFailedState = state === "failed";
-              return (
-                <li
-                  key={state}
-                  className={cn(
-                    "flex items-center gap-3 rounded-md px-3 py-2 text-sm",
-                    isCurrent && "bg-accent text-accent-foreground",
-                    isPast && "text-foreground/70",
-                    !isCurrent && !isPast && !isFailedState && "text-muted-foreground"
-                  )}
-                  aria-current={isCurrent ? "step" : undefined}
-                >
-                  <StateIcon size={16} className={cn(isCurrent && "text-primary")} />
-                  <span className={cn(isCurrent && "font-medium")}>{stateMeta.label}</span>
-                  {isCurrent && <Badge className="ml-auto">current</Badge>}
-                </li>
-              );
-            })}
-          </ol>
+           <ol className="flex flex-col">
+             {appConfig.processingStates.map((state, index) => {
+               const stateMeta = STATE_META[state];
+               const StateIcon = stateMeta.icon;
+               const isCurrent = state === job.status;
+               const isPast = index < stateIndex && job.status !== "failed";
+               const isFailedHere = state === "failed" && job.status === "failed";
+               return (
+                 <li
+                   key={state}
+                   className={cn(
+                     "relative flex items-center gap-3 py-2 pl-1 text-sm",
+                     isCurrent && "rounded-xl bg-accent/70 px-2 -mx-1"
+                   )}
+                   aria-current={isCurrent ? "step" : undefined}
+                 >
+                   <span
+                     className={cn(
+                       "flex h-8 w-8 shrink-0 items-center justify-center rounded-full border transition-colors duration-300",
+                       isCurrent
+                         ? "border-primary/60 bg-primary/15 text-primary shadow-lg shadow-primary/20"
+                         : isPast
+                           ? "border-border bg-secondary/60 text-foreground/60"
+                           : isFailedHere
+                             ? "border-destructive/50 bg-destructive/10 text-destructive"
+                             : "border-border bg-background/40 text-muted-foreground/60"
+                     )}
+                   >
+                     {isPast ? <Check size={14} strokeWidth={2.5} /> : <StateIcon size={14} className={cn(isCurrent && job.status === "queued" && "animate-spin")} />}
+                   </span>
+                   <span
+                     className={cn(
+                       isCurrent
+                         ? "font-medium text-foreground"
+                         : isPast
+                           ? "text-foreground/60"
+                           : isFailedHere
+                             ? "font-medium text-destructive"
+                             : "text-muted-foreground"
+                     )}
+                   >
+                     {stateMeta.label}
+                   </span>
+                   {isCurrent && <Badge className="ml-auto rounded-full">current</Badge>}
+                 </li>
+               );
+             })}
+           </ol>
         </CardContent>
       </Card>
     </div>

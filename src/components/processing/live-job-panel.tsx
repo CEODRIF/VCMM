@@ -2,10 +2,12 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { Film, Loader2, RefreshCw } from "lucide-react";
+import { AlertTriangle, Film, KeyRound, RefreshCw } from "lucide-react";
 
 import { ProcessingPanel } from "@/components/processing/processing-panel";
+import { buttonVariants, Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
 import type { Job } from "@/types";
 
 /**
@@ -120,26 +122,49 @@ export function LiveJobPanel({ jobId }: { jobId: string }) {
   }, [jobId]);
 
   if (loading) {
+    // TASK 016 — skeleton (no layout shift, no fake job data).
     return (
-      <Card className="card-surface">
-        <CardContent className="flex items-center justify-center gap-3 py-16 text-muted-foreground">
-          <Loader2 size={18} className="animate-spin" /> Loading job status…
-        </CardContent>
-      </Card>
+      <div className="grid gap-6 lg:grid-cols-[1fr_320px]" aria-busy="true" aria-label="Loading job status">
+        <Card className="card-surface">
+          <CardContent className="flex flex-col gap-5 p-6">
+            <div className="flex items-center justify-between">
+              <Skeleton className="h-6 w-44" />
+              <Skeleton className="h-6 w-24 rounded-full" />
+            </div>
+            <div className="flex items-center gap-4">
+              <Skeleton className="h-12 w-12 rounded-xl" />
+              <div className="flex-1">
+                <Skeleton className="mb-2 h-4 w-32" />
+                <Skeleton className="h-2 w-full rounded-full" />
+                <Skeleton className="mt-3 h-3 w-3/4" />
+              </div>
+            </div>
+            <Skeleton className="h-20 w-full rounded-xl" />
+          </CardContent>
+        </Card>
+        <Card className="card-surface hidden lg:block">
+          <CardContent className="flex flex-col gap-2 p-6">
+            <Skeleton className="h-4 w-32" />
+            {Array.from({ length: 7 }).map((_, i) => (
+              <Skeleton key={i} className="h-8 w-full" />
+            ))}
+          </CardContent>
+        </Card>
+      </div>
     );
   }
 
   if (authRequired) {
     return (
-      <Card className="card-surface">
-        <CardContent className="flex flex-col items-center gap-4 py-12 text-center">
-          <p className="text-sm text-muted-foreground">
+      <Card className="card-surface animate-fade-in">
+        <CardContent className="flex flex-col items-center gap-4 py-16 text-center">
+          <span className="glass flex h-12 w-12 items-center justify-center rounded-2xl text-muted-foreground">
+            <KeyRound size={20} strokeWidth={1.75} aria-hidden />
+          </span>
+          <p className="max-w-sm text-sm text-muted-foreground">
             Your session is not active, so this job cannot be shown.
           </p>
-          <Link
-            href="/access"
-            className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow transition-colors hover:bg-primary/90"
-          >
+          <Link href="/access" className={buttonVariants()}>
             Enter your access code
           </Link>
         </CardContent>
@@ -149,14 +174,14 @@ export function LiveJobPanel({ jobId }: { jobId: string }) {
 
   if (error || !job) {
     return (
-      <Card className="card-surface">
-        <CardContent className="flex flex-col items-center gap-4 py-12 text-center">
-          <p className="text-sm text-muted-foreground">{error ?? "Job unavailable."}</p>
-          <Link
-            href="/processing"
-            className="inline-flex items-center gap-2 text-sm font-medium text-primary hover:underline"
-          >
-            <RefreshCw size={14} /> Back to the overview
+      <Card className="card-surface animate-fade-in">
+        <CardContent className="flex flex-col items-center gap-4 py-16 text-center">
+          <span className="flex h-12 w-12 items-center justify-center rounded-2xl border border-destructive/40 bg-destructive/10 text-destructive">
+            <AlertTriangle size={20} strokeWidth={1.75} aria-hidden />
+          </span>
+          <p className="max-w-sm text-sm text-muted-foreground">{error ?? "Job unavailable."}</p>
+          <Link href="/processing" className={buttonVariants({ variant: "outline" })}>
+            <RefreshCw size={14} aria-hidden /> Back to the overview
           </Link>
         </CardContent>
       </Card>
@@ -166,14 +191,11 @@ export function LiveJobPanel({ jobId }: { jobId: string }) {
   return (
     <div className="space-y-4">
       {job.status === "completed" && (
-        <Link
-          href={`/results?job=${job.id}`}
-          className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow transition-colors hover:bg-primary/90"
-        >
+        <Link href={`/results?job=${job.id}`} className={buttonVariants({ size: "lg", className: "rounded-xl" })}>
           <Film size={16} aria-hidden /> View your clips
         </Link>
       )}
-      <ProcessingPanel job={job} live />
+      <ProcessingPanel job={job} />
     </div>
   );
 }
