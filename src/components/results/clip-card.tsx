@@ -1,11 +1,11 @@
 "use client";
 
 import * as React from "react";
-import { Download, Loader2, Play, RefreshCw } from "lucide-react";
+import { Download, Loader2, Play, RefreshCw, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { formatDurationSeconds } from "@/lib/utils";
+import { formatBytes, formatDurationSeconds } from "@/lib/utils";
 import type { ResultsClipView } from "@/lib/results/view";
 
 type PreviewState =
@@ -13,23 +13,52 @@ type PreviewState =
   | { status: "ready"; url: string }
   | { status: "error" };
 
+/** Source-timestamp label: 41s -> "00:41"; 75.5s -> "01:16". */
+function sourceStamp(seconds: number | null | undefined): string | null {
+  if (seconds == null || !Number.isFinite(seconds)) return null;
+  const total = Math.max(0, Math.round(seconds));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
 /**
- * Single clip result card (Phase 6 — live).
+ * Single clip result card (Phase 6 — live; TASK 015 P4 extended).
  *
  * - Preview: a SHORT-LIVED signed URL is fetched lazily for this clip and
  *   played in a native <video> element. On failure the card degrades to a
  *   placeholder with a retry — the rest of the grid keeps working.
  * - Download: mints a short-lived signed URL (attachment flavour) and
  *   triggers the browser download through a transient anchor.
+ * - Delete (P4): two-step inline confirmation (no fake optimistic state) —
+ *   the card calls `onDeleted` ONLY after the server confirms the object is
+ *   verified gone and the row is removed.
+ * - Metadata (P4): every value is MEASURED server-side (ffprobe / storage
+ *   listing); a missing value renders "—", never a guess.
  *
- * Both endpoints re-verify session + ownership + clip/job association on
- * every request; this component never sees storage paths or credentials.
+ * Both signed-URL endpoints and the delete endpoint re-verify session +
+ * ownership + clip/job association on every request; this component never
+ * sees storage paths or credentials.
  */
-export function ClipCard({ clip, jobId, index }: { clip: ResultsClipView; jobId: string; index: number }) {
+export function ClipCard({
+  clip,
+  jobId,
+  index,
+  onDeleted,
+}: {
+  clip: ResultsClipView;
+  jobId: string;
+  index: number;
+  /** Called with the clip id after the SERVER confirms the permanent deletion. */
+  onDeleted?: (clipId: string) => void;
+}) {
   const [preview, setPreview] = React.useState<PreviewState>({ status: "loading" });
   const [downloading, setDownloading] = React.useState(false);
   const [downloadError, setDownloadError] = React.useState<string | null>(null);
   const [previewRetry, setPreviewRetry] = React.useState(0);
+  const [confirmDelete, setConfirmDelete] = React.useState(false);
+  const [deleting, setDeleting] = React.useState(false);
+  const [deleteError, setDeleteError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -60,6 +89,13 @@ export function ClipCard({ clip, jobId, index }: { clip: ResultsClipView; jobId:
     };
   }, [jobId, clip.id, clip.downloadable, previewRetry]);
 
+  // The inline confirmation auto-cancels (no stale "confirm" state).
+  React.useEffect(() => {
+    if (!confirmDelete) return;
+    const t = setTimeout(() => setConfirmDelete(false), 5000);
+    return () => clearTimeout(t);
+  }, [confirmDelete]);
+
   async function handleDownload() {
     setDownloading(true);
     setDownloadError(null);
@@ -85,6 +121,39 @@ export function ClipCard({ clip, jobId, index }: { clip: ResultsClipView; jobId:
       setDownloading(false);
     }
   }
+
+  async function handleDelete() {
+    // First click arms the confirmation; the second performs the deletion.
+    if (!confirmDelete) {
+      setConfirmDelete(true);
+      return;
+    }
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      const response = await fetch(`/api/v1/jobs/${jobId}/clips/${clip.id}`, { method: "DELETE" });
+      const data = (await response.json().catch(() => null)) as { deleted?: boolean; error?: string } | null;
+      if (response.ok && data?.deleted) {
+        // The server verified the object is gone and the row is removed.
+        onDeleted?.(clip.id);
+        return;
+      }
+      setDeleteError(
+        data?.error ?? "Deletion did not complete — the clip is still available."
+      );
+      setConfirmDelete(false);
+    } catch {
+      setDeleteError("Network error during deletion — the clip is still available.");
+      setConfirmDelete(false);
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  const startStamp = sourceStamp(clip.startTime);
+  const endStamp = sourceStamp(clip.endTime);
+  const resolution = clip.width && clip.height ? `${clip.width} × ${clip.height}` : null;
+  const fps = clip.outputFps != null ? `${Math.round(clip.outputFps * 10) / 10} FPS` : null;
 
   return (
     <div
@@ -125,7 +194,7 @@ export function ClipCard({ clip, jobId, index }: { clip: ResultsClipView; jobId:
         )}
         <Badge className="absolute left-3 top-3">{formatDurationSeconds(clip.duration)}</Badge>
         <span className="absolute bottom-3 right-3 text-[10px] uppercase tracking-wide text-foreground/50">
-          9:16 · 1080p
+          {resolution ? `${resolution} · 9:16` : "9:16"}
         </span>
       </div>
 
@@ -137,22 +206,61 @@ export function ClipCard({ clip, jobId, index }: { clip: ResultsClipView; jobId:
           <h3 className="mt-1 font-medium leading-snug">{clip.title}</h3>
         </div>
 
-        <Button
-          variant="outline"
-          size="sm"
-          className="mt-auto"
-          disabled={!clip.downloadable || downloading}
-          onClick={handleDownload}
-          aria-busy={downloading}
-        >
-          {downloading ? (
-            <Loader2 size={14} className="animate-spin" aria-hidden />
-          ) : (
-            <Download size={14} aria-hidden />
-          )}
-          {downloading ? "Preparing…" : "Download"}
-        </Button>
+        {/* Measured facts only — a missing value is "—", never a guess. */}
+        <dl className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+          <dt className="sr-only">Source time range</dt>
+          <dd>{startStamp != null && endStamp != null ? `Source ${startStamp}–${endStamp}` : "Source —"}</dd>
+          <dt className="sr-only">Generation mode</dt>
+          <dd>{clip.mode === "full_coverage" ? "Full video" : clip.mode === "highlights" ? "Highlights" : "Mode —"}</dd>
+          <dt className="sr-only">Output frame rate</dt>
+          <dd>{fps ? `Rate ${fps}` : "Rate —"}</dd>
+          <dt className="sr-only">File size</dt>
+          <dd>{clip.fileSizeBytes != null ? `Size ${formatBytes(clip.fileSizeBytes)}` : "Size —"}</dd>
+        </dl>
 
+        <div className="mt-auto flex gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="flex-1"
+            disabled={!clip.downloadable || downloading}
+            onClick={handleDownload}
+            aria-busy={downloading}
+          >
+            {downloading ? (
+              <Loader2 size={14} className="animate-spin" aria-hidden />
+            ) : (
+              <Download size={14} aria-hidden />
+            )}
+            {downloading ? "Preparing…" : "Download"}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="flex-1 border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
+            disabled={deleting || !clip.downloadable}
+            onClick={handleDelete}
+            aria-busy={deleting}
+          >
+            {deleting ? (
+              <Loader2 size={14} className="animate-spin" aria-hidden />
+            ) : (
+              <Trash2 size={14} aria-hidden />
+            )}
+            {deleting ? "Deleting…" : confirmDelete ? "Confirm delete" : "Delete"}
+          </Button>
+        </div>
+
+        {confirmDelete && !deleting && (
+          <p className="text-[11px] text-muted-foreground" role="status">
+            This permanently removes the clip file. Confirm within a few seconds.
+          </p>
+        )}
+        {deleteError && (
+          <p className="text-xs text-destructive" role="alert">
+            {deleteError}
+          </p>
+        )}
         {downloadError && (
           <p className="text-xs text-destructive" role="alert">
             {downloadError}
