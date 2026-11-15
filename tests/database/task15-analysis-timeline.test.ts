@@ -114,10 +114,10 @@ describe("TASK 015 migration: analysis_timeline", () => {
       "window_index",
     ]);
     const rls = await q(`select relname, relrowsecurity from pg_class where relname = 'analysis_timeline'`);
-    expect(rls[0].relrowsecurity).toBe(true);
+    expect(rls[0]!.relrowsecurity).toBe(true);
     // No policy for anon: deny-by-default (same contract as candidate_events).
     const policies = await q(`select count(*)::int as n from pg_policies where tablename = 'analysis_timeline'`);
-    expect(policies[0].n).toBe(0);
+    expect(policies[0]!.n).toBe(0);
   });
 
   it("persists window rows and upserts idempotently on (job_id, window_index)", async () => {
@@ -128,7 +128,7 @@ describe("TASK 015 migration: analysis_timeline", () => {
     let rows = await q(`select window_index, end_time from public.analysis_timeline
                         where job_id = '${JOB_ID}' order by window_index`);
     expect(rows).toHaveLength(3);
-    expect(rows[2].end_time).toBe(25);
+    expect(rows[2]!.end_time).toBe(25);
 
     // Re-upsert window 1 (resume semantics: the same key is replaced, not
     // duplicated) — with an UPDATED honest assessment.
@@ -144,8 +144,8 @@ describe("TASK 015 migration: analysis_timeline", () => {
     rows = await q(`select transcript, gemini_assessment from public.analysis_timeline
                     where job_id = '${JOB_ID}' and window_index = 1`);
     expect(rows).toHaveLength(1);
-    expect(rows[0].transcript).toBe("actual words v2");
-    expect((rows[0].gemini_assessment as { scene_description: string }).scene_description).toBe("updated");
+    expect(rows[0]!.transcript).toBe("actual words v2");
+    expect((rows[0]!.gemini_assessment as { scene_description: string }).scene_description).toBe("updated");
   });
 
   it("enforces the honesty-bound checks (ranges + ordering)", async () => {
@@ -176,9 +176,9 @@ describe("TASK 015 migration: analysis_timeline", () => {
     await seedJob(OTHER_JOB_ID);
     await insertRow(JOB_ID, 0, 0, 10);
     const other = await q(`select count(*)::int as n from public.analysis_timeline where job_id = '${OTHER_JOB_ID}'`);
-    expect(other[0].n).toBe(0);
+    expect(other[0]!.n).toBe(0);
     const mine = await q(`select count(*)::int as n from public.analysis_timeline where job_id = '${JOB_ID}'`);
-    expect(mine[0].n).toBe(1);
+    expect(mine[0]!.n).toBe(1);
   });
 
   it("denies the anon role (RLS deny-by-default, service-role only)", async () => {
@@ -190,7 +190,7 @@ describe("TASK 015 migration: analysis_timeline", () => {
     try {
       await db!.exec(`set role service_role`);
       const asService = await q(`select count(*)::int as n from public.analysis_timeline where job_id = '${JOB_ID}'`);
-      expect(asService[0].n).toBeGreaterThan(0);
+      expect(asService[0]!.n).toBeGreaterThan(0);
     } finally {
       await db!.exec(`reset role`);
     }
@@ -211,9 +211,9 @@ describe("TASK 015 migration: analysis_timeline", () => {
   it("cascades with the job (job-level cleanup leaves no orphans)", async () => {
     await seedJob(OTHER_JOB_ID);
     await insertRow(OTHER_JOB_ID, 0, 0, 10);
-    expect((await q(`select count(*)::int as n from public.analysis_timeline where job_id = '${OTHER_JOB_ID}'`))[0].n).toBe(1);
+    expect((await q(`select count(*)::int as n from public.analysis_timeline where job_id = '${OTHER_JOB_ID}'`))[0]!.n).toBe(1);
     await q(`delete from public.jobs where id = '${OTHER_JOB_ID}'`);
-    expect((await q(`select count(*)::int as n from public.analysis_timeline where job_id = '${OTHER_JOB_ID}'`))[0].n).toBe(0);
+    expect((await q(`select count(*)::int as n from public.analysis_timeline where job_id = '${OTHER_JOB_ID}'`))[0]!.n).toBe(0);
   });
 
   it("is idempotent (re-applying is a no-op)", async () => {
@@ -223,6 +223,6 @@ describe("TASK 015 migration: analysis_timeline", () => {
     await db!.exec(sql);
     const rows = await q(`select count(*)::int as n from public.analysis_timeline where job_id = '${JOB_ID}'`);
     // existing rows survive the re-apply
-    expect(rows[0].n).toBe(1);
+    expect(rows[0]!.n).toBe(1);
   });
 });
