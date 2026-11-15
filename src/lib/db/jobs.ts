@@ -46,6 +46,10 @@ export interface JobRow {
   created_at: string;
   completed_at: string | null;
   expires_at: string | null;
+  /** Phase 6: set when the job's artifacts were purged (manual or user cleanup). */
+  purged_at: string | null;
+  /** TASK 015 P4: non-NULL = a user cleanup failed partway (visible + retryable). */
+  cleanup_error: string | null;
   // Phase 3 — queue / ingestion
   attempt_count: number;
   max_attempts: number;
