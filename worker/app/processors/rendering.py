@@ -142,8 +142,14 @@ class RenderProcessor:
                                       str(exc), permanent=False)
                 return
             if not clips:
+                # Backstop: analysis should have failed earlier with
+                # no_clips — reaching here means the clip set vanished.
+                # Fail honestly with an actionable message (never a fake
+                # "completed" with zero clips).
                 await self._safe_fail(job_id, worker_id, ERROR_NO_CLIPS_TO_RENDER,
-                                      "the job has no clips to render", permanent=True)
+                                      "no renderable clips remain for this job — "
+                                      "it cannot be completed. Please create the job again.",
+                                      permanent=True)
                 return
             todo = [c for c in clips if c.get("status") != "ready"]
             await self._report(job_id, worker_id, _PROGRESS_RENDER_BASE)

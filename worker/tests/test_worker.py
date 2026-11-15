@@ -24,6 +24,9 @@ class FakeQueue:
         self.raise_queue_error_times = 0
         self.closed = False
 
+    async def reap_stale_uploading_jobs(self, max_age_seconds):  # TASK 017 no-op
+        return 0
+
     async def claim_next_job(self, worker_id, lease_seconds):
         self.claims += 1
         self.last_worker_id = worker_id

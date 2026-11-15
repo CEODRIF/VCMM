@@ -9,6 +9,7 @@ import { appConfig } from "@/config/app";
 import type { SourceType } from "@/types";
 import { cn, formatBytes } from "@/lib/utils";
 import { classifyVideoUrl, validateClipCount, validateClipDuration, validateTwitchUrl, validateYoutubeUrl } from "@/lib/validation/clips";
+import { describeStorageTransferFailure } from "@/lib/api/storage-errors";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -119,11 +120,24 @@ export function CreationForm() {
     setCreatedJobId(null);
   }
 
+  /**
+   * TASK 017: cancels the in-flight transfer AND fails the job row.
+   * Without the cancel call an aborted upload would leave the job
+   * 'uploading' forever (the worker's reaper eventually fails it too —
+   * that call is best-effort: if it cannot reach the server, the
+   * server-side reaper is the safety net).
+   */
   function abortUpload() {
     xhrRef.current?.abort();
     xhrRef.current = null;
+    const jobId = createdJobId;
     setUploadStage("idle");
     setUploadProgress(0);
+    setServerError("Upload cancelled.");
+    if (jobId) {
+      setCreatedJobId(null); // job becomes terminal — hide the retry button
+      fetch(`/api/v1/jobs/${jobId}/cancel`, { method: "POST" }).catch(() => {});
+    }
   }
 
   function extensionOf(name: string): string {
@@ -161,6 +175,11 @@ export function CreationForm() {
       if (!authResponse.ok || !authData?.uploadUrl) {
         setUploadStage("idle");
         setServerError(authData?.error ?? "Could not authorize the upload. Try again.");
+        // TASK 017: 409 = the job left the 'uploading' state (e.g. the
+        // server-side reaper failed a zombie upload, or the user cancelled
+        // it). Drop the stale reference so the NEXT click creates a fresh
+        // job instead of looping on a terminal one.
+        if (authResponse.status === 409) setCreatedJobId(null);
         return false;
       }
 
@@ -210,18 +229,22 @@ export function CreationForm() {
         xhrRef.current = null;
         if (xhr.status >= 200 && xhr.status < 300) resolve(true);
         else {
-          setServerError("The storage transfer failed. Retry the upload.");
+          // TASK 017: interpret the failure (413 too large / 403 rejected
+          // link / 5xx storage down) — actionable, and never a claim that
+          // the file arrived.
+          setServerError(describeStorageTransferFailure(xhr.status, xhr.responseText));
           resolve(false);
         }
       };
       xhr.onerror = () => {
         xhrRef.current = null;
-        setServerError("The storage transfer failed. Check your connection and retry.");
+        setServerError(describeStorageTransferFailure(null));
         resolve(false);
       };
       xhr.onabort = () => {
         xhrRef.current = null;
-        setServerError("Upload cancelled. You can start the upload again.");
+        // abortUpload() already failed the job row + set the message.
+        setServerError("Upload cancelled.");
         resolve(false);
       };
       xhr.send(payload);
@@ -231,6 +254,13 @@ export function CreationForm() {
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (busy) return;
+
+    // TASK 017 (production upload-failure investigation): capture a job
+    // still waiting for its file BEFORE the transient-state reset. When
+    // one exists, this submission RE-UPLOADS that job (idempotent) instead
+    // of leaking another zombie 'uploading' row per click.
+    const waitingJobId = sourceType === "upload" ? createdJobId : null;
+
     resetTransientState();
     setErrors({});
 
@@ -263,6 +293,20 @@ export function CreationForm() {
     if (!durationCheck.valid) nextErrors.duration = durationCheck.error;
     setErrors(nextErrors);
     if (Object.values(nextErrors).some(Boolean)) return;
+
+    // TASK 017: idempotent upload — a job from a previous failed attempt
+    // is still waiting for its file, so re-run the upload against THAT
+    // job (fresh authorization) instead of creating a second job.
+    if (waitingJobId) {
+      setSubmitting(true);
+      try {
+        const ok = await runUpload(waitingJobId);
+        if (ok) router.push(`/processing?job=${waitingJobId}`);
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
 
     setSubmitting(true);
     try {
@@ -754,7 +798,7 @@ export function CreationForm() {
               </>
             ) : (
               <>
-                <Wand2 size={16} /> Start Creating
+                <Wand2 size={16} /> {sourceType === "upload" && createdJobId ? "Resume upload" : "Start Creating"}
               </>
             )}
           </Button>

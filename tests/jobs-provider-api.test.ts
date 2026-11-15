@@ -11,6 +11,7 @@ vi.mock("@/lib/db/sessions", () => ({
   deleteSessionRow: vi.fn(),
 }));
 vi.mock("@/lib/db/jobs", () => ({
+  findActiveJobForSourceUrl: vi.fn(),
   insertJob: vi.fn(),
   findJobForSession: vi.fn(),
   listJobsForSession: vi.fn(),
