@@ -86,6 +86,7 @@ function clipRow(overrides: Partial<ClipRow> = {}): ClipRow {
     sort_order: 0,
     status: "ready",
     storage_path: `clips/${JOB_ID}/${CLIP_ID}.mp4`,
+    mode: "highlights",
     ...overrides,
   };
 }
@@ -176,6 +177,9 @@ describe("GET /api/v1/jobs/[jobId]/results", () => {
     // The clip listing is job-scoped — the server-verified id only.
     expect(listClipsMock).toHaveBeenCalledWith(JOB_ID);
 
+    // P4: the job block carries the retention/cleanup markers (null here —
+    // the mock row predates them) and the measured source duration (null: no
+    // source metadata on this legacy row).
     expect(body.job).toEqual({
       id: JOB_ID,
       status: "completed",
@@ -183,13 +187,18 @@ describe("GET /api/v1/jobs/[jobId]/results", () => {
       createdAt: FUTURE,
       completedAt: FUTURE,
       expiresAt: EXPIRY,
+      sourceDurationSeconds: null,
       // Two clips have status `ready` (the broken-path one is ready but not downloadable).
       clipsReady: 2,
     });
+    // P4: each clip carries its exact source window, generation mode and the
+    // live file size from the storage listing (1234 for the one object that
+    // exists; null where the listing has no entry and the DB has no
+    // measured size — never a guessed value).
     expect(body.clips).toEqual([
-      { id: CLIP_ID, title: "The opening hook", duration: 60, sortOrder: 0, status: "ready", downloadable: true },
-      { id: CLIP_ID_2, title: "Broken path clip", duration: 60, sortOrder: 1, status: "ready", downloadable: false },
-      { id: CLIP_ID_2, title: "Still rendering", duration: 60, sortOrder: 2, status: "processing", downloadable: false },
+      { id: CLIP_ID, title: "The opening hook", duration: 60, sortOrder: 0, status: "ready", downloadable: true, startTime: 32, endTime: 92, mode: "highlights", fileSizeBytes: 1234 },
+      { id: CLIP_ID_2, title: "Broken path clip", duration: 60, sortOrder: 1, status: "ready", downloadable: false, startTime: 32, endTime: 92, mode: "highlights", fileSizeBytes: null },
+      { id: CLIP_ID_2, title: "Still rendering", duration: 60, sortOrder: 2, status: "processing", downloadable: false, startTime: 32, endTime: 92, mode: "highlights", fileSizeBytes: null },
     ]);
     // ZIP feasibility: only the ONE downloadable clip counts toward the size.
     expect(body.zip).toEqual({ available: true, totalBytes: 1234, limitBytes: 1024 * 1024 * 1024 });

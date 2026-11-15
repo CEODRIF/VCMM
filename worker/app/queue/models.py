@@ -58,6 +58,11 @@ ERROR_TRANSCRIPTION_UNAVAILABLE = "transcription_unavailable"
 ERROR_NO_SPEECH = "no_speech"
 ERROR_NO_CLIPS = "no_clips_detected"
 ERROR_CLIPS_PERSIST = "clips_persistence_failed"
+# TASK 015 (full-timeline coverage): the coverage record could not be built
+# or persisted. Transient in the store-error form (re-claim resumes from
+# persisted windows); permanent ONLY when the coverage invariant itself
+# is violated (an internal bug — never a silent partial success).
+ERROR_TIMELINE = "timeline_persistence_failed"
 # Phase 5 (rendering):
 ERROR_RENDER_FAILED = "render_failed"
 ERROR_RENDER_INVALID = "render_invalid"

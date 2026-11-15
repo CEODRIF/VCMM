@@ -108,6 +108,105 @@ export async function listJobClipObjects(jobId: string): Promise<Map<string, Cli
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// TASK 015 P4 — permanent deletion (service role, canonical paths only)
+// ---------------------------------------------------------------------------
+
+const SOURCE_PATH_RE = /^sources\/([0-9a-f-]{36})\/original\/[^/]+$/i;
+
+/**
+ * Verifies the stored source path is the canonical, job-scoped shape the
+ * API generated (`sources/{jobId}/original/<file>`). A corrupt or foreign
+ * path is NEVER deleted.
+ */
+export function validateSourcePath(sourcePath: string | null, jobId: string): boolean {
+  if (!sourcePath) return false;
+  const match = SOURCE_PATH_RE.exec(sourcePath);
+  const jobPart = match?.[1];
+  return jobPart !== undefined && jobPart.toLowerCase() === jobId.toLowerCase();
+}
+
+/**
+ * Deletes ONE canonical clip object and VERIFIES its absence.
+ *
+ * - Already missing (404 before the delete) → `{ missing: true }` —
+ *   idempotent retry of a deletion whose object step previously succeeded.
+ * - Delete + absence verified → `{ deleted: true }`.
+ * - Transport failure, or absence NOT verified → throws; the caller must
+ *   roll the clip status back and report an inaccuracy (never "success").
+ */
+export async function deleteClipObject(
+  ref: ClipObjectRef
+): Promise<{ deleted: boolean; missing: boolean }> {
+  const { url, serviceRoleKey } = getSupabaseCredentials();
+  const path = clipObjectPath(ref.jobId, ref.clipId);
+  const headers = { Authorization: `Bearer ${serviceRoleKey}` };
+  const objectUrl = `${url}/storage/v1/object/${uploadConfig.clipsBucket}/${path}`;
+
+  const pre = await fetch(objectUrl, { method: "HEAD", headers }).catch((error) => {
+    throw new Error(`Clip object check failed: ${error instanceof Error ? error.message : "network"}`);
+  });
+  if (pre.status === 404) return { deleted: false, missing: true };
+  if (pre.status !== 200) {
+    throw new Error(`Clip object check failed: ${pre.status}`);
+  }
+
+  const del = await fetch(objectUrl, { method: "DELETE", headers }).catch((error) => {
+    throw new Error(`Clip object deletion failed: ${error instanceof Error ? error.message : "network"}`);
+  });
+  if (del.status !== 200 && del.status !== 404) {
+    throw new Error(`Clip object deletion failed: ${del.status}`);
+  }
+
+  const post = await fetch(objectUrl, { method: "HEAD", headers }).catch((error) => {
+    throw new Error(`Clip object verification failed: ${error instanceof Error ? error.message : "network"}`);
+  });
+  if (post.status !== 404) {
+    throw new Error("Clip object deletion could not be verified (object still present).");
+  }
+  return { deleted: true, missing: false };
+}
+
+/**
+ * Deletes ONE canonical SOURCE object and verifies its absence. Same
+ * idempotency/verification contract as :func:`deleteClipObject`.
+ * The path is cross-checked against the owning job before any request.
+ */
+export async function deleteSourceObject(
+  jobId: string,
+  sourcePath: string
+): Promise<{ deleted: boolean; missing: boolean }> {
+  if (!validateSourcePath(sourcePath, jobId)) {
+    throw new Error("Source path is not a canonical job-scoped object path.");
+  }
+  const { url, serviceRoleKey } = getSupabaseCredentials();
+  const headers = { Authorization: `Bearer ${serviceRoleKey}` };
+  const objectUrl = `${url}/storage/v1/object/${uploadConfig.sourcesBucket}/${sourcePath}`;
+
+  const pre = await fetch(objectUrl, { method: "HEAD", headers }).catch((error) => {
+    throw new Error(`Source object check failed: ${error instanceof Error ? error.message : "network"}`);
+  });
+  if (pre.status === 404) return { deleted: false, missing: true };
+  if (pre.status !== 200) {
+    throw new Error(`Source object check failed: ${pre.status}`);
+  }
+
+  const del = await fetch(objectUrl, { method: "DELETE", headers }).catch((error) => {
+    throw new Error(`Source object deletion failed: ${error instanceof Error ? error.message : "network"}`);
+  });
+  if (del.status !== 200 && del.status !== 404) {
+    throw new Error(`Source object deletion failed: ${del.status}`);
+  }
+
+  const post = await fetch(objectUrl, { method: "HEAD", headers }).catch((error) => {
+    throw new Error(`Source object verification failed: ${error instanceof Error ? error.message : "network"}`);
+  });
+  if (post.status !== 404) {
+    throw new Error("Source object deletion could not be verified (object still present).");
+  }
+  return { deleted: true, missing: false };
+}
+
 /**
  * Streams ONE clip object from Storage as a web ReadableStream — TRUE
  * streaming: the object is fetched with the service key over the Storage

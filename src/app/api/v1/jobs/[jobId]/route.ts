@@ -33,6 +33,13 @@ export async function GET(request: Request, context: { params: { jobId: string }
     // Phase 4: how many clips were detected so far (0 until analysis runs).
     const clipsCount = await countClipsForJob(jobId);
 
+    // TASK 015 P3: the measured source duration (ingestion persists it in
+    // source_metadata) drives the full-coverage expected-clip-count display.
+    const rawDuration = (row.source_metadata as Record<string, unknown> | null)
+      ?.duration_seconds;
+    const sourceDurationSeconds =
+      typeof rawDuration === "number" && rawDuration > 0 ? rawDuration : null;
+
     return NextResponse.json({
       job: {
         id: row.id,
@@ -40,6 +47,9 @@ export async function GET(request: Request, context: { params: { jobId: string }
         requestedClips: row.requested_clips,
         clipDurationSeconds: row.clip_duration_seconds,
         captionsEnabled: row.captions_enabled,
+        generationMode: row.generation_mode,
+        outputFps: row.output_fps,
+        sourceDurationSeconds,
         status: row.status,
         progress: row.progress,
         createdAt: row.created_at,

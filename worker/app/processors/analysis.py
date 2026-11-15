@@ -35,8 +35,24 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from ..ai.clip_detection import NoClipsDetectedError, ScoredClip, TranscriptClipDetector
+from ..ai.clip_planning import (
+    plan_full_coverage,
+    rank_highlights,
+    spans_overlap_ratio,
+)
+from ..ai.gemini import GLOBAL_VIDEO_PROMPT, GeminiClient, GeminiError, GeminiNotConfiguredError
+from ..ai.timeline import (
+    TimelineCoverageError,
+    TimelineRow,
+    build_timeline_rows,
+    plan_windows,
+    verify_coverage,
+    window_evidence,
+    window_text,
+)
 from ..config.settings import Settings
 from ..intel.audio_features import AudioFeatureError
+from ..db.timeline_store import TimelineStore, TimelineStoreError
 from ..intel.checkpoints import IntelStore, IntelStoreError
 from ..intel.facecam import FacecamConfig, build_facecam_analyzer
 from ..intel.game_vision import build_game_vision_analyzer
@@ -52,6 +68,7 @@ from ..queue.models import (
     ERROR_NO_CLIPS,
     ERROR_NO_SPEECH,
     ERROR_STORAGE_DOWNLOAD,
+    ERROR_TIMELINE,
     ERROR_TRANSCRIPTION,
     ERROR_TRANSCRIPTION_UNAVAILABLE,
     ERROR_UNKNOWN,
@@ -80,6 +97,8 @@ class AnalysisProcessor:
         clip_store: SupabaseClipStore,
         detector: Optional[TranscriptClipDetector] = None,
         intel_store: Optional[IntelStore] = None,
+        timeline_store: Optional[TimelineStore] = None,
+        gemini: Optional[GeminiClient] = None,
     ) -> None:
         self._settings = settings
         self._queue = queue
@@ -93,6 +112,14 @@ class AnalysisProcessor:
         #: the settings + this store; the transcript detector remains the
         #: fallback for a completed run that yields no signal candidates.
         self._intel_store = intel_store
+        #: TASK 015: the full-timeline coverage store (analysis_timeline) —
+        #: when set, BOTH the intel and transcript paths build + persist the
+        #: coverage record (job-scoped, idempotent, resumable). ``gemini``
+        #: (when configured) enriches each window with a semantic assessment;
+        #: without it the timeline is still built from measured local
+        #: evidence + transcript with an honest 'not_configured' state.
+        self._timeline_store = timeline_store
+        self._gemini = gemini
 
     async def process_job(self, job: dict[str, Any], on_lease_lost: Optional[Callable[[], None]] = None) -> None:
         """Runs the full analysis lifecycle for one claimed job.
@@ -205,17 +232,35 @@ class AnalysisProcessor:
             if stage == "already":
                 logger.info("job %s: crash recovery — continuing from analyzing", job_id)
 
-            # 6) Detect + score the best complete-idea windows.
-            requested = int(job.get("requested_clips") or 3)
+            # 6) TASK 015: full-timeline coverage FIRST (transcript path) —
+            #    the unified timeline is both the coverage record and the
+            #    MODE B ranking input.
+            duration = float(info.duration_seconds)
             target = float(job.get("clip_duration_seconds") or 90)
-            try:
-                clips = self._detector.detect_scored(list(result.segments), requested, int(target))
-            except NoClipsDetectedError as exc:
-                await self._safe_fail(job_id, worker_id, ERROR_NO_CLIPS, str(exc), permanent=True)
+            timeline_ok, tl_rows = await self._run_timeline(job_id, worker_id, duration,
+                                                            [], list(result.segments), destination)
+            if not timeline_ok:
                 return
+            mode = self._generation_mode(job)
+            if mode == "full_coverage":
+                # MODE A: the whole source tiled into sequential clips — no
+                # viral gating, no skipping of ordinary sections.
+                # requested_clips is a derivation slot (NULL), never a cap.
+                clips = self._full_coverage_clips(duration, int(target))
+            else:
+                # 6a) MODE B: detect + score the best complete-idea windows,
+                #     then merge the timeline-ranked candidates (when any).
+                requested = int(job.get("requested_clips") or 3)
+                try:
+                    base_clips = self._detector.detect_scored(list(result.segments), requested, int(target))
+                except NoClipsDetectedError as exc:
+                    await self._safe_fail(job_id, worker_id, ERROR_NO_CLIPS, str(exc), permanent=True)
+                    return
+                clips = self._merge_timeline_highlights(base_clips, tl_rows, requested, int(target), duration)
             await self._report(job_id, worker_id, 80)
 
-            # 7) Persist the explainable clip set (scoped to this job).
+            # 7) Persist the clip set (scoped to this job; replaces any
+            #    previous set — idempotent re-claim).
             try:
                 count = await self._clip_store.save_clips(job_id, clips)
             except ClipsPersistenceError as exc:
@@ -466,12 +511,31 @@ class AnalysisProcessor:
             logger.info("job %s: crash recovery — finalizing the completed intel run", job_id)
 
         if result.candidates:
-            clips: list[ScoredClip] = [self._intel_clip(c) for c in result.candidates]
+            # TASK 015: full-timeline coverage (intel signal path — the
+            # measured events feed the per-window evidence) BEFORE the clip
+            # set, so MODE A can tile and MODE B can rank over the timeline.
+            duration = float(info.duration_seconds)
+            target = int(job.get("clip_duration_seconds") or 90)
+            timeline_ok, tl_rows = await self._run_timeline(job_id, worker_id, duration,
+                                                            list(result.events), [], destination)
+            if not timeline_ok:
+                return
+            mode = self._generation_mode(job)
+            if mode == "full_coverage":
+                clips = self._full_coverage_clips(duration, target)
+            else:
+                requested = int(job.get("requested_clips") or 3)
+                base_clips: list[ScoredClip] = [self._intel_clip(c) for c in result.candidates]
+                clips = self._merge_timeline_highlights(base_clips, tl_rows, requested, target, duration)
             await self._report(job_id, worker_id, 80)
         else:
             # No qualifying signal candidates: fall back to the Phase 4
-            # transcript detector (extract + transcribe + detect).
-            clips = await self._transcript_clips(job, job_id, worker_id, destination, tmp_dir)
+            # transcript detector (extract + transcribe + detect). The
+            # completed intel run's events + duration feed the timeline too
+            # (same job timeline for both paths).
+            clips = await self._transcript_clips(job, job_id, worker_id, destination, tmp_dir,
+                                                 events=list(result.events),
+                                                 duration_seconds=float(info.duration_seconds))
             if clips is None:
                 return  # the fallback already recorded its failure
         await self._persist_and_park(job_id, worker_id, clips)
@@ -490,6 +554,9 @@ class AnalysisProcessor:
         worker_id: str,
         destination: Path,
         tmp_dir: Path,
+        *,
+        events: list[Any] | None = None,
+        duration_seconds: float = 0.0,
     ) -> Optional[list[ScoredClip]]:
         """The Phase 4 transcript detection (extract + transcribe + detect),
         invoked as the fallback when a completed intel run yields no signal
@@ -535,11 +602,31 @@ class AnalysisProcessor:
             return None
         await self._report(job_id, worker_id, 55)
 
-        try:
-            clips = self._detector.detect_scored(list(result.segments), requested, int(target))
-        except NoClipsDetectedError as exc:
-            await self._safe_fail(job_id, worker_id, ERROR_NO_CLIPS, str(exc), permanent=True)
-            return None
+        # TASK 015: full-timeline coverage (transcript fallback of a
+        # completed intel run — transcript + the intel events that WERE
+        # measured) BEFORE the clip set.
+        tl_rows: list[Any] | None = None
+        if duration_seconds > 0:
+            timeline_ok, tl_rows = await self._run_timeline(
+                job_id, worker_id, duration_seconds, events or [],
+                list(result.segments), destination)
+            if not timeline_ok:
+                return None
+        mode = self._generation_mode(job)
+        if mode == "full_coverage":
+            # MODE A: the whole source tiled — the transcript was still
+            # analyzed (timeline + coverage), the clip set is the tiling.
+            clips = self._full_coverage_clips(duration_seconds, int(target))
+        else:
+            # MODE B: detect + score, then merge the timeline candidates.
+            try:
+                base_clips = self._detector.detect_scored(list(result.segments), requested, int(target))
+            except NoClipsDetectedError as exc:
+                await self._safe_fail(job_id, worker_id, ERROR_NO_CLIPS, str(exc), permanent=True)
+                return None
+            clips = (self._merge_timeline_highlights(base_clips, tl_rows, requested,
+                                                     int(target), duration_seconds)
+                     if duration_seconds > 0 else base_clips)
         await self._report(job_id, worker_id, 80)
         return clips
 
@@ -557,6 +644,225 @@ class AnalysisProcessor:
             logger.warning("job %s: could not park — ownership lost; clips may persist", job_id)
             return
         logger.info("job %s analysis complete: %d clip(s) parked at 'analyzing'", job_id, count)
+
+    # -- TASK 015: full-timeline coverage (both analysis paths) ------------------
+
+    async def _run_timeline(
+        self,
+        job_id: str,
+        worker_id: str,
+        duration_seconds: float,
+        events: list[Any],
+        segments: list[Any],
+        destination: Path,
+    ) -> tuple[bool, list[TimelineRow] | None]:
+        """Builds + persists the full-timeline coverage record.
+
+        Returns ``(ok, rows)``: ``ok`` False after a RECORDED job failure
+        (the caller must then return without further terminal writes);
+        ``rows`` = the built timeline (MODE B ranking input) on success,
+        None when the feature is not wired. A Gemini failure NEVER marks
+        the timeline as fully analyzed (per-window honest state) and never
+        fails the job on its own; a coverage-invariant violation or a store
+        failure fails the job (transient, re-claim resumes from persisted
+        windows)."""
+        if self._timeline_store is None:
+            return True, None
+        try:
+            rows = await self._build_and_persist_timeline(job_id, duration_seconds, events, segments, destination)
+            return True, rows
+        except TimelineCoverageError as exc:
+            await self._safe_fail(job_id, worker_id, ERROR_TIMELINE,
+                                  f"timeline coverage invariant violated: {exc}", permanent=True)
+            return False, None
+        except (TimelineStoreError, GeminiError) as exc:
+            await self._safe_fail(job_id, worker_id, ERROR_TIMELINE, str(exc), permanent=False)
+            return False, None
+        except Exception as exc:  # noqa: BLE001 — top-level job boundary
+            logger.exception("job %s: unexpected timeline error: %s", job_id, exc.__class__.__name__)
+            await self._safe_fail(job_id, worker_id, ERROR_TIMELINE,
+                                  f"timeline analysis failed: {exc.__class__.__name__}", permanent=False)
+            return False, None
+
+    async def _build_and_persist_timeline(
+        self,
+        job_id: str,
+        duration_seconds: float,
+        events: list[Any],
+        segments: list[Any],
+        destination: Path,
+    ) -> list[TimelineRow]:
+        """The coverage build (deterministic tiling + measured evidence +
+        optional per-window Gemini assessment), verified, then persisted
+        with job-scoped idempotent upserts. Resume: windows whose
+        persisted assessment is 'ok' are NOT re-billed to Gemini; failed /
+        not_configured windows are re-attempted while Gemini is
+        configured (bounded by the job's own resume budget). Returns the
+        built rows (MODE B ranking input)."""
+        s = self._settings
+        windows = plan_windows(duration_seconds, s.gemini_timeline_window_seconds,
+                               s.gemini_timeline_max_windows)
+        existing = await self._timeline_store.load_rows(job_id)
+        gemini_on = self._gemini is not None and self._gemini.is_configured
+
+        global_context: str | None = None
+        if gemini_on and s.gemini_video_understanding_enabled:
+            try:
+                size = destination.stat().st_size if destination.exists() else 0
+                if 0 < size <= s.gemini_video_max_upload_bytes:
+                    name = await self._gemini.upload_video(destination)
+                    try:
+                        global_context = await self._gemini.understand_video(
+                            name, GLOBAL_VIDEO_PROMPT)
+                    finally:
+                        await self._gemini.delete_file(name)
+            except GeminiError as exc:
+                # Honest degradation: the global pass is enrichment, and its
+                # failure must not block the window coverage.
+                logger.warning("job %s: global video pass skipped (%s)", job_id, exc)
+
+        assessments: dict[int, dict[str, Any]] = {}
+        for w in windows:
+            row = existing.get(w.index)
+            status = ((row or {}).get("gemini_assessment") or {}).get("status") \
+                if isinstance(row, dict) else None
+            if status == "ok" and isinstance(row, dict):
+                assessments[w.index] = dict(row.get("gemini_assessment") or {})
+            elif not gemini_on:
+                continue  # row stays 'not_configured' — honest, free
+            else:
+                ev = window_evidence(events, w.start, w.end)
+                payload = {
+                    "index": w.index,
+                    "start": round(w.start, 3),
+                    "end": round(w.end, 3),
+                    "source_duration": round(duration_seconds, 3),
+                    "transcript": window_text(segments, w.start, w.end),
+                    "audio_events": ev["audio"],
+                    "visual_events": ev["visual"],
+                }
+                try:
+                    assessments[w.index] = await self._gemini.assess_window(
+                        payload, global_context=global_context)
+                except GeminiNotConfiguredError:
+                    continue
+                except GeminiError as exc:
+                    # Per-window honest failure: recorded, not swallowed.
+                    # (The message is safe by construction — no keys.)
+                    logger.warning("job %s: window %d gemini assessment failed (%s)",
+                                   job_id, w.index, exc.__class__.__name__)
+                    assessments[w.index] = {
+                        "status": "failed",
+                        "reason": f"{exc.__class__.__name__}: {exc}"[:300],
+                    }
+
+        rows = build_timeline_rows(duration_seconds, windows, segments, events, assessments)
+        verify_coverage(rows, duration_seconds)
+        await self._timeline_store.upsert_rows(
+            job_id, [r.to_db_row(job_id) for r in rows])
+        logger.info(
+            "job %s: timeline persisted — %d windows over %.1fs (gemini=%s)",
+            job_id, len(rows), duration_seconds, "on" if gemini_on else "off",
+        )
+        return rows
+
+    # -- TASK 015 P3: generation modes (A = full coverage, B = highlights) --
+
+    @staticmethod
+    def _generation_mode(job: dict[str, Any]) -> str:
+        """'highlights' (default; existing jobs have no column value) or
+        'full_coverage'."""
+        mode = str(job.get("generation_mode") or "highlights")
+        return mode if mode in ("highlights", "full_coverage") else "highlights"
+
+    @staticmethod
+    def _full_coverage_clips(duration_seconds: float, clip_duration: int) -> list[ScoredClip]:
+        """MODE A: the ENTIRE source tiled into sequential clips — count =
+        ceil(duration / clip_duration) with the documented remainder
+        policy. No viral gating, no skipping of ordinary sections; the
+        neutral score (50) is a completeness label, not a quality claim."""
+        spans = plan_full_coverage(duration_seconds, float(clip_duration))
+        n = len(spans)
+        return [
+            ScoredClip(
+                start=round(s.start, 3),
+                end=round(s.end, 3),
+                title=f"Reel {i + 1}/{n}",
+                score=50.0,
+                scoring={"total": 50.0, "scale": "0-100",
+                         "method": "full-coverage (deterministic tiling; "
+                                   "neutral score — not a quality ranking)",
+                         "coverage": "complete",
+                         "remainder_policy": "kept if >=10s, else appended "
+                                             "to the previous clip"},
+                mode="full_coverage",
+            )
+            for i, s in enumerate(spans)
+        ]
+
+    def _merge_timeline_highlights(
+        self,
+        base_clips: list[ScoredClip],
+        rows: list[TimelineRow] | None,
+        requested: int,
+        clip_duration: int,
+        duration_seconds: float,
+    ) -> list[ScoredClip]:
+        """MODE B: merge the existing detector/intel candidates with the
+        timeline-ranked candidates (P2 assessments + measured signals),
+        dedupe near-duplicates (shorter-window IoU), rank by the
+        TRANSPARENT score, and bound by the user's requested count (a
+        hard upper bound). No timeline signal -> the base candidates
+        unchanged (the product works without Gemini)."""
+        if not rows:
+            return base_clips
+        row_dicts = [
+            {
+                "window_index": r.window_index,
+                "start_time": r.start_time,
+                "end_time": r.end_time,
+                "transcript": r.transcript,
+                "confidence": r.confidence,
+                "event_importance": r.event_importance,
+                "gemini_assessment": r.gemini_assessment,
+            }
+            for r in rows
+        ]
+        candidates = rank_highlights(row_dicts, float(clip_duration), max(1, requested),
+                                     duration_seconds=duration_seconds)
+        if not candidates:
+            return base_clips
+        timeline_clips = [
+            ScoredClip(
+                start=round(c.start, 3),
+                end=round(c.end, 3),
+                title=f"Highlight at {int(c.start) // 60:02d}:{int(c.start) % 60:02d}",
+                score=c.score,
+                scoring={
+                    "total": c.score, "scale": "0-100",
+                    "method": "timeline ranking (transparent): "
+                              "100*(0.5*importance + 0.3*measured confidence "
+                              "+ 0.2*candidate-window fraction)",
+                    "importance": c.importance, "measured_confidence": c.confidence,
+                    "windows": c.window_count,
+                    "note": "potential estimate, not a virality guarantee",
+                },
+                mode="highlights",
+            )
+            for c in candidates
+        ]
+        # Merge: timeline candidates first (they carry the P2 semantic +
+        # measured signal), then the base candidates; dedup keeps the
+        # higher score of any near-duplicate pair.
+        merged: list[ScoredClip] = []
+        for clip in sorted(timeline_clips + base_clips, key=lambda c: -c.score):
+            if all(
+                spans_overlap_ratio(clip.start, clip.end, k.start, k.end) <= 0.5
+                for k in merged
+            ):
+                merged.append(clip)
+        merged.sort(key=lambda c: -c.score)
+        return merged[: max(1, requested)]
 
     def _intel_clip(self, candidate: SelectedClip) -> ScoredClip:
         """Maps an intel-selected candidate to a persistable :class:`ScoredClip`.

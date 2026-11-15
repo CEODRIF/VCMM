@@ -792,6 +792,47 @@ Phase 6 (results API & product completion):
 - `tests/database/phase6-retention.test.ts` → the retention trigger + marker
   semantics asserted on a real PostgreSQL engine (pglite WASM).
 
+TASK 015 (universal video-to-reels engine, P1–P5) — extends the
+TASK 014 provider layer and the Phase 6 results surface; see
+`docs/video-ingestion.md`, `docs/video-analysis.md`,
+`docs/video-generation.md`, `docs/storage-lifecycle.md` and
+`docs/provider-capabilities.md` for the full, capability-honest writeups:
+
+- **P1 — providers**: `worker/app/providers/kick.py` (official Kick public
+  API, metadata only — no official VOD media endpoint, typed permanent
+  refusal), universal `source_type` = `kick`/`direct_url` at the schema
+  level; API capability gate (`src/lib/jobs/service.ts`) refuses
+  metadata-only sources with an actionable 503 **before** any job row
+  exists, so no job is ever processed without actually acquirable media.
+- **P2 — Gemini + full timeline**: `worker/app/ai/gemini.py` (multi-key
+  round-robin pool, per-key 120 s quota cooldown, permanent-error
+  quarantine, zero-network unconfigured path) + `worker/app/ai/timeline.py`
+  (gapless tiling into `public.analysis_timeline`, per-window status
+  written, never assumed; Gemini failure is recorded and never fatal on
+  its own) + `worker/app/ai/clip_planning.py`.
+- **P3 — generation modes + FPS**: `jobs.generation_mode`
+  (`full_coverage` = ceil-tiling of the whole timeline, remainder
+  keep/merge · `highlights` = scored window selection, IoU ≤ 0.3 dedup,
+  works without Gemini) + `output_fps` ∈ {30,60} rendered explicitly and
+  ffprobe-verified; 1080×1920 H.264 + AAC; per-clip `mode`; frontend mode/
+  FPS selectors.
+- **P4 — results actions**: measured clip metadata persisted with `ready`
+  (`clips.width/height/output_fps/file_size_bytes`, displayed or "—",
+  never guessed); `DELETE /api/v1/jobs/[jobId]/clips/[clipId]` (atomic
+  `deleting` state → HEAD/DELETE/HEAD verified absence → guarded row
+  delete; storage failure = rollback + 502, never false success;
+  idempotent retries); `POST /api/v1/jobs/[jobId]/cleanup` (confirm-gated,
+  clips → source → `purged_at`, partial failure visible + retryable via
+  `jobs.cleanup_error`); `WORKER_SOURCE_RETENTION` (default `keep`);
+  manual bounded orphan sweep (`python -m app.cleanup --orphans`);
+  dashboard shows source window/mode/resolution/FPS/size/status with
+  server-confirmed deletion only.
+- **P5 — final integration**: migration ordering proven on a real engine
+  (clean install of all 15 files + upgrade from the TASK 014 end-state +
+  idempotent re-apply — `tests/database/task15-migration-order.test.ts`);
+  documentation set (the five `docs/video-*.md`/`provider-capabilities.md`);
+  focused final regression (see README §Testing).
+
 ## Remaining integration points (marked in code)
 
 | Location | Marker | Lands in |

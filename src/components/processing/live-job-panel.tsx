@@ -26,9 +26,12 @@ function shouldStopPolling(job: Job): boolean {
 interface PublicJob {
   id: string;
   sourceType: "youtube" | "upload";
-  requestedClips: number;
+  requestedClips: number | null;
   clipDurationSeconds: number;
   captionsEnabled: boolean;
+  generationMode?: "highlights" | "full_coverage";
+  outputFps?: number | null;
+  sourceDurationSeconds?: number | null;
   status: Job["status"];
   progress: number;
   createdAt: string;
@@ -84,6 +87,9 @@ export function LiveJobPanel({ jobId }: { jobId: string }) {
           sourceType: publicJob.sourceType,
           requestedClips: publicJob.requestedClips,
           clipDurationSeconds: publicJob.clipDurationSeconds,
+          generationMode: publicJob.generationMode,
+          outputFps: publicJob.outputFps,
+          sourceDurationSeconds: publicJob.sourceDurationSeconds,
           status: publicJob.status,
           progress: publicJob.progress,
           createdAt: publicJob.createdAt,

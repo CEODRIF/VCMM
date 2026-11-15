@@ -121,14 +121,20 @@ class FFmpegRenderer(BaseRenderer):
         base_plan = self._profile.video_filter(width, height, cw)
         rotate_filter = _ROTATION_FILTERS[cw]
         filter_chain = f"{rotate_filter},{base_plan}" if rotate_filter else base_plan
-        # Preserve the MEASURED source rate (TASK 007, Priority 4): 23.976 /
-        # 24 / 30 / 55 / 59.94 / 60 fps sources each render at their own
-        # rate — the output never exceeds the measured rate, so frames are
-        # never duplicated to fake a higher rate; unknown rates keep the
-        # profile default.
-        out_fps = select_output_fps(
-            source_fps, self._fps_low, self._fps_high, self._fps_high_source_threshold
-        )
+        # TASK 015 P3: an explicit user choice (jobs.output_fps 30|60)
+        # FORCES the output rate — including 60 from a low-rate source
+        # (FFmpeg duplicates frames; the output is a genuine 60fps stream,
+        # verified by ffprobe; it is not claimed to be native 60fps
+        # material). Legacy jobs (target_fps None) keep the TASK 007
+        # source-rate-preserving behavior: 23.976 / 24 / 30 / 55 / 59.94 /
+        # 60 fps sources each render at their own rate — the output never
+        # exceeds the measured rate; unknown rates keep the profile default.
+        if spec.target_fps in (30, 60):
+            out_fps = float(spec.target_fps)
+        else:
+            out_fps = select_output_fps(
+                source_fps, self._fps_low, self._fps_high, self._fps_high_source_threshold
+            )
 
         # Captions (Phase 5B): real words only, prepared BEFORE the process
         # starts (deterministic), written into the per-job temp dir, and

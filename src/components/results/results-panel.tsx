@@ -9,6 +9,7 @@ import {
   Film,
   Loader2,
   RefreshCw,
+  Trash2,
 } from "lucide-react";
 
 import { ClipCard } from "@/components/results/clip-card";
@@ -16,8 +17,11 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import {
+  canCleanup,
+  cleanupIncomplete,
   downloadableClips,
   interpretResults,
+  isPurged,
   shouldPoll,
   type ResultsClipView,
   type ResultsJobView,
@@ -52,6 +56,18 @@ function CenterCard({ children }: { children: React.ReactNode }) {
 export function ResultsPanel({ jobId }: { jobId: string }) {
   const [state, setState] = React.useState<ResultsState>({ phase: "loading" });
   const [retry, setRetry] = React.useState(0);
+  // TASK 015 P4: clips removed AFTER the server confirmed their deletion
+  // (no optimistic updates — the server response is the trigger).
+  const [removedIds, setRemovedIds] = React.useState<Set<string>>(new Set());
+  const [cleanupBusy, setCleanupBusy] = React.useState(false);
+  const [confirmCleanup, setConfirmCleanup] = React.useState(false);
+
+  // The inline confirmation auto-cancels.
+  React.useEffect(() => {
+    if (!confirmCleanup) return;
+    const t = setTimeout(() => setConfirmCleanup(false), 6000);
+    return () => clearTimeout(t);
+  }, [confirmCleanup]);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -82,6 +98,52 @@ export function ResultsPanel({ jobId }: { jobId: string }) {
       if (timer) clearTimeout(timer);
     };
   }, [jobId, retry]);
+
+  function handleClipDeleted(clipId: string) {
+    // Server-confirmed: hide the card and force a fresh results fetch.
+    setRemovedIds((previous) => new Set(previous).add(clipId));
+    setRetry((k) => k + 1);
+  }
+
+  async function handleCleanup() {
+    // First click arms the confirmation; the second runs the cleanup.
+    if (!confirmCleanup) {
+      setConfirmCleanup(true);
+      return;
+    }
+    setConfirmCleanup(false);
+    setCleanupBusy(true);
+    try {
+      const response = await fetch(`/api/v1/jobs/${jobId}/cleanup`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ confirm: true }),
+      });
+      const data = (await response.json().catch(() => null)) as {
+        purged?: boolean;
+        errors?: string[];
+        error?: string;
+      } | null;
+      if (response.ok && data && Array.isArray(data.errors)) {
+        // Full or partial outcome — the results refetch shows the real
+        // state (cleaned-up card, or the visible retryable failure banner).
+        if (!data.purged && data.errors.length > 0) {
+          // eslint-disable-next-line no-console
+          console.warn("job cleanup partial failure:", data.errors);
+        }
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn("job cleanup rejected:", response.status, data?.error ?? "");
+      }
+      setRetry((k) => k + 1);
+    } catch {
+      // eslint-disable-next-line no-console
+      console.warn("job cleanup network error");
+      setRetry((k) => k + 1);
+    } finally {
+      setCleanupBusy(false);
+    }
+  }
 
   if (state.phase === "loading") {
     return (
@@ -187,19 +249,32 @@ export function ResultsPanel({ jobId }: { jobId: string }) {
 
   // phase === "ready"
   const { data, expired } = state;
-  const clips = downloadableClips(state);
+  const clips = downloadableClips(state).filter((c) => !removedIds.has(c.id));
   const zip = data.zip;
   const zipBlockedBySize = Boolean(zip && !zip.available && zip.totalBytes > 0);
+  const purged = isPurged(state);
+  const cleanupFailed = cleanupIncomplete(state);
+  const modeLabel =
+    data.job.generationMode === "full_coverage" ? "Full video to reels"
+    : data.job.generationMode === "highlights" ? "Viral highlights"
+    : null;
 
   return (
     <div className="space-y-6" aria-live="polite">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <p className="text-sm text-muted-foreground">
-          {clips.length > 0
-            ? `${clips.length} clip${clips.length === 1 ? "" : "s"} ready — preview and download below.`
-            : "The job finished, but no clips were rendered."}
+          {purged
+            ? "All media for this job was permanently deleted."
+            : clips.length > 0
+              ? `${clips.length} clip${clips.length === 1 ? "" : "s"} ready — preview and download below.`
+              : "The job finished, but no clips were rendered."}
+          {modeLabel && !purged && <span aria-hidden> · {modeLabel}</span>}
+          {data.job.outputFps != null && !purged && (
+            <span aria-hidden> · {data.job.outputFps} FPS output</span>
+          )}
         </p>
-        {clips.length > 0 && !expired && (
+        <div className="flex flex-wrap items-center gap-2">
+        {clips.length > 0 && !expired && !purged && (
           zip?.available ? (
             <a
               href={`/api/v1/jobs/${data.job.id}/download-all`}
@@ -219,7 +294,54 @@ export function ResultsPanel({ jobId }: { jobId: string }) {
             </span>
           )
         )}
+        {canCleanup(state) && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
+            disabled={cleanupBusy}
+            onClick={handleCleanup}
+            aria-busy={cleanupBusy}
+          >
+            {cleanupBusy ? (
+              <Loader2 size={14} className="animate-spin" aria-hidden />
+            ) : (
+              <Trash2 size={14} aria-hidden />
+            )}
+            {cleanupBusy ? "Cleaning up…" : confirmCleanup ? "Confirm delete all" : "Delete all"}
+          </Button>
+        )}
+        </div>
       </div>
+
+      {confirmCleanup && !cleanupBusy && (
+        <div
+          role="alert"
+          className="flex items-start gap-3 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive"
+        >
+          <Trash2 size={16} className="mt-0.5 shrink-0" aria-hidden />
+          <p>
+            This permanently deletes ALL generated clips and the source file for this job.
+            Click “Confirm delete all” within a few seconds to proceed.
+          </p>
+        </div>
+      )}
+
+      {cleanupFailed && (
+        <div
+          role="alert"
+          className="flex flex-wrap items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300"
+        >
+          <AlertTriangle size={16} className="mt-0.5 shrink-0" aria-hidden />
+          <p className="min-w-0 flex-1">
+            <span className="font-medium">Cleanup incomplete — retry available. </span>
+            {data.job.cleanupError}
+          </p>
+          <Button variant="outline" size="sm" disabled={cleanupBusy} onClick={handleCleanup}>
+            <RefreshCw size={14} aria-hidden /> Retry cleanup
+          </Button>
+        </div>
+      )}
 
       {expired && (
         <div
@@ -238,7 +360,9 @@ export function ResultsPanel({ jobId }: { jobId: string }) {
         <CenterCard>
           <Film size={28} className="text-muted-foreground" aria-hidden />
           <p className="text-sm text-muted-foreground">
-            No clips are available to download for this job.
+            {purged
+              ? "All generated clips and the source file for this job have been permanently deleted."
+              : "No clips are available to download for this job."}
           </p>
           <Link
             href="/"
@@ -250,7 +374,13 @@ export function ResultsPanel({ jobId }: { jobId: string }) {
       ) : (
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
           {clips.map((clip, index) => (
-            <ClipCard key={clip.id} clip={clip} jobId={data.job.id} index={index} />
+            <ClipCard
+              key={clip.id}
+              clip={clip}
+              jobId={data.job.id}
+              index={index}
+              onDeleted={handleClipDeleted}
+            />
           ))}
         </div>
       )}

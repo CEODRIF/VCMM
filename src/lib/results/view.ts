@@ -24,9 +24,21 @@ export interface ResultsClipView {
   title: string;
   duration: number;
   sortOrder: number;
-  status: "pending" | "processing" | "ready" | "failed";
+  status: "pending" | "processing" | "ready" | "failed" | "deleting";
   /** True only for ready clips with a verified storage object path. */
   downloadable: boolean;
+  /**
+   * TASK 015 P4 — exact source timestamps + the MEASURED output contract.
+   * All optional: absent/`null` means "not available" (the UI shows "—",
+   * never a guessed value).
+   */
+  startTime?: number | null;
+  endTime?: number | null;
+  mode?: "highlights" | "full_coverage" | null;
+  width?: number | null;
+  height?: number | null;
+  outputFps?: number | null;
+  fileSizeBytes?: number | null;
 }
 
 export interface ResultsJobView {
@@ -38,6 +50,14 @@ export interface ResultsJobView {
   /** Retention deadline (Phase 6): when the artifacts become eligible for cleanup. */
   expiresAt: string | null;
   clipsReady: number;
+  /** TASK 015 P4 — cleanup state (Phase 6 marker reused). */
+  purgedAt?: string | null;
+  /** Non-NULL = a user cleanup failed partway (visible + retryable). */
+  cleanupError?: string | null;
+  /** TASK 015 P3 — generation settings (display only). */
+  generationMode?: "highlights" | "full_coverage" | null;
+  outputFps?: number | null;
+  sourceDurationSeconds?: number | null;
 }
 
 export interface ResultsZipView {
@@ -116,4 +136,28 @@ export function shouldPoll(state: ResultsState): boolean {
 export function downloadableClips(state: ResultsState): ResultsClipView[] {
   if (state.phase !== "ready") return [];
   return state.data.clips.filter((c) => c.downloadable);
+}
+
+// ---------------------------------------------------------------------------
+// TASK 015 P4 — job-level cleanup state helpers
+// ---------------------------------------------------------------------------
+
+/** True once the job's artifacts were purged (manual purge or user cleanup). */
+export function isPurged(state: ResultsState): boolean {
+  if (state.phase !== "ready" && state.phase !== "failed") return false;
+  return state.data.job.purgedAt != null;
+}
+
+/** A user cleanup failed partway — visible + retryable (the job stays
+ *  un-purged while this is true). */
+export function cleanupIncomplete(state: ResultsState): boolean {
+  if (state.phase !== "ready" && state.phase !== "failed") return false;
+  return state.data.job.purgedAt == null && state.data.job.cleanupError != null;
+}
+
+/** The "Delete all / cleanup" action is available for a TERMINAL job that
+ *  has not been purged yet and whose artifacts may still exist. */
+export function canCleanup(state: ResultsState): boolean {
+  if (state.phase !== "ready" && state.phase !== "failed") return false;
+  return state.data.job.purgedAt == null;
 }

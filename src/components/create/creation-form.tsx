@@ -75,6 +75,14 @@ const VIDEO_TAB_HINTS: Record<string, { tone: "ok" | "warn"; text: string }> = {
     tone: "warn",
     text: "Live stream — not a completed recording. Wait for the VOD, or upload the file directly.",
   },
+  "kick-vod": {
+    tone: "warn",
+    text: "Kick VOD — the official Kick API has no VOD media-download endpoint (VODs expire 14-30 days after the broadcast). Export from Kick Studio and upload the file directly.",
+  },
+  "kick-live": {
+    tone: "warn",
+    text: "Kick live stream — not a completed recording. Wait for the VOD, or upload the file directly.",
+  },
 };
 
 export function CreationForm() {
@@ -88,6 +96,9 @@ export function CreationForm() {
   const [clipCount, setClipCount] = React.useState<number>(clips.defaultCount);
   const [duration, setDuration] = React.useState<number>(clips.defaultSeconds);
   const [captionsEnabled, setCaptionsEnabled] = React.useState(true);
+  // TASK 015 P3 — generation mode + explicit output frame rate.
+  const [mode, setMode] = React.useState<"highlights" | "full_coverage">("highlights");
+  const [fps, setFps] = React.useState<30 | 60>(30);
 
   const [errors, setErrors] = React.useState<FieldErrors>({});
   const [submitting, setSubmitting] = React.useState(false);
@@ -242,8 +253,12 @@ export function CreationForm() {
     } else if (!file) {
       nextErrors.source = "Drop a video file or pick one from your device.";
     }
-    const countCheck = validateClipCount(clipCount);
-    if (!countCheck.valid) nextErrors.clipCount = countCheck.error;
+    // TASK 015 P3: the clip COUNT is a highlights-only control; full
+    // coverage derives its count from the source duration at analysis.
+    if (mode === "highlights") {
+      const countCheck = validateClipCount(clipCount);
+      if (!countCheck.valid) nextErrors.clipCount = countCheck.error;
+    }
     const durationCheck = validateClipDuration(duration);
     if (!durationCheck.valid) nextErrors.duration = durationCheck.error;
     setErrors(nextErrors);
@@ -260,14 +275,16 @@ export function CreationForm() {
              // type (youtube → honest 503 refusal server-side; twitch
              // → per-class gate: clips queued, VOD/live actionable 503;
              // direct-file → queued as direct_url).
-             sourceType:
-               sourceType === "video"
-                 ? linkKind === "direct-file"
-                   ? "direct_url"
-                   : linkKind === "youtube"
-                     ? "youtube"
-                     : "twitch"
-                 : sourceType,
+              sourceType:
+                sourceType === "video"
+                  ? linkKind === "direct-file"
+                    ? "direct_url"
+                    : linkKind === "youtube"
+                      ? "youtube"
+                      : linkKind === "kick-vod" || linkKind === "kick-live"
+                        ? "kick"
+                        : "twitch"
+                  : sourceType,
              youtubeUrl:
                sourceType === "youtube"
                  ? youtubeUrl.trim()
@@ -277,11 +294,16 @@ export function CreationForm() {
              twitchUrl: sourceType === "twitch" ? twitchUrl.trim() : undefined,
              videoUrl:
                sourceType === "video" && linkKind !== "youtube" ? videoUrl.trim() : undefined,
-             fileName: sourceType === "upload" ? file?.name : undefined,
-             clipCount,
-             clipDurationSeconds: duration,
-             captionsEnabled,
-           }),
+              fileName: sourceType === "upload" ? file?.name : undefined,
+              // TASK 015 P3: full_coverage omits clipCount (the API derives
+              // ceil(source_duration / clip_duration) at analysis — a user
+              // count must never truncate full coverage).
+              clipCount: mode === "highlights" ? clipCount : undefined,
+              clipDurationSeconds: duration,
+              generationMode: mode,
+              outputFps: fps,
+              captionsEnabled,
+            }),
       });
       const data = (await response.json().catch(() => null)) as {
         error?: string;
@@ -538,26 +560,81 @@ export function CreationForm() {
           <CardDescription>How many clips, and how long each one should be.</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-5">
+          {/* TASK 015 P3 — generation mode */}
           <div className="flex flex-col gap-2">
-            <Label htmlFor="clip-count">Number of clips</Label>
-            <Select
-              id="clip-count"
-              value={clipCount}
-              disabled={busy}
-              onChange={(event) => setClipCount(Number(event.target.value))}
-            >
-              {COUNT_OPTIONS.map((count) => (
-                <option key={count} value={count}>
-                  {count} {count === 1 ? "clip" : "clips"}
-                </option>
+            <Label>Generation mode</Label>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {(
+                [
+                  {
+                    id: "highlights",
+                    title: "Viral highlights",
+                    desc: "The strongest moments, ranked by a transparent score. Estimates potential — never promises virality.",
+                  },
+                  {
+                    id: "full_coverage",
+                    title: "Full video to reels",
+                    desc: `Every second, tiled into sequential ${duration}s clips in order. Count = ceil(source ÷ ${duration}s).`,
+                  },
+                ] as const
+              ).map((option) => (
+                <label
+                  key={option.id}
+                  className={
+                    "flex cursor-pointer flex-col gap-1 rounded-md border p-3 text-sm transition-colors " +
+                    (mode === option.id
+                      ? "border-primary bg-primary/5"
+                      : "bg-background/40 hover:bg-background/70")
+                  }
+                >
+                  <span className="flex items-center gap-2 font-medium">
+                    <input
+                      type="radio"
+                      name="generation-mode"
+                      className="accent-primary"
+                      checked={mode === option.id}
+                      disabled={busy}
+                      onChange={() => setMode(option.id)}
+                    />
+                    {option.title}
+                  </span>
+                  <span className="pl-6 text-xs text-muted-foreground">{option.desc}</span>
+                </label>
               ))}
-            </Select>
-            {errors.clipCount && (
-              <p className="text-sm text-destructive" role="alert">
-                {errors.clipCount}
-              </p>
-            )}
+            </div>
           </div>
+
+          {mode === "highlights" ? (
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="clip-count">Number of clips (upper bound)</Label>
+              <Select
+                id="clip-count"
+                value={clipCount}
+                disabled={busy}
+                onChange={(event) => setClipCount(Number(event.target.value))}
+              >
+                {COUNT_OPTIONS.map((count) => (
+                  <option key={count} value={count}>
+                    {count} {count === 1 ? "clip" : "clips"}
+                  </option>
+                ))}
+              </Select>
+              {errors.clipCount && (
+                <p className="text-sm text-destructive" role="alert">
+                  {errors.clipCount}
+                </p>
+              )}
+            </div>
+          ) : (
+            <div className="flex flex-col gap-1 rounded-md border bg-background/40 p-3 text-xs text-muted-foreground">
+              <p className="font-medium text-foreground">Expected clip count</p>
+              <p>
+                ceil(source duration ÷ {duration}s) — computed from the real source length once
+                analysis starts. The final short remainder becomes its own clip when it is 10s or
+                longer, otherwise it is appended to the previous clip. Nothing is skipped or padded.
+              </p>
+            </div>
+          )}
 
           <div className="flex flex-col gap-2">
             <Label htmlFor="clip-duration">Clip duration</Label>
@@ -583,10 +660,29 @@ export function CreationForm() {
             )}
           </div>
 
+          {/* TASK 015 P3 — explicit output frame rate */}
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="output-fps">Output frame rate</Label>
+            <Select
+              id="output-fps"
+              value={fps}
+              disabled={busy}
+              onChange={(event) => setFps(Number(event.target.value) as 30 | 60)}
+            >
+              <option value={30}>30 FPS</option>
+              <option value={60}>60 FPS</option>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              {fps === 60
+                ? "If the source is under 55 FPS, frames are duplicated to reach a genuine 60 FPS stream — the output is 60 FPS, not native 60 FPS material."
+                : "30 FPS output (downsampled from higher-rate sources)."}
+            </p>
+          </div>
+
           <Separator />
 
           <div className="flex flex-col gap-2">
-            <p className="text-sm font-medium">Output (fixed by the product spec)</p>
+            <p className="text-sm font-medium">Output format (fixed by the product spec)</p>
             <div className="grid grid-cols-3 gap-2 text-center text-xs">
               <div className="rounded-md border bg-background/40 px-2 py-2">
                 <p className="font-semibold text-foreground">{output.aspectRatio}</p>

@@ -65,6 +65,7 @@ from .base import (
     STATUS_RESTRICTED,
     STATUS_UNAVAILABLE,
     ProviderCheck,
+    UniversalIngestionMixin,
 )
 from .errors import InvalidUrlError, TransferInterruptedError
 from .http_guard import ProbeResult, SafeHttpClient, _assert_url_shape
@@ -163,7 +164,7 @@ class DirectUrlConfig:
         return not self.host_allowlist
 
 
-class DirectUrlProvider:
+class DirectUrlProvider(UniversalIngestionMixin):
     name = "direct_url"
     supports_validation = True
     # The URL itself is the authorized source: a public file the user

@@ -18,6 +18,7 @@ from typing import Sequence
 
 from .base import ProviderNotSupported, StreamProvider
 from .direct_url import DirectUrlConfig, DirectUrlProvider
+from .kick import KickConfig, KickProvider
 from .twitch import TwitchConfig, TwitchProvider
 from .upload import UploadProvider
 from .youtube import YouTubeConfig, YouTubeProvider
@@ -60,6 +61,15 @@ def _twitch_config_from(settings) -> TwitchConfig | None:
     )
 
 
+def _kick_config_from(settings) -> KickConfig | None:
+    if settings is None:
+        return None
+    return KickConfig(
+        api_key=settings.kick_api_key,
+        api_base=settings.kick_api_base,
+    )
+
+
 def _direct_url_config_from(settings) -> DirectUrlConfig | None:
     if settings is None:
         return None
@@ -93,10 +103,13 @@ def default_providers(
       official Get Clips Download endpoint under the creator's OAuth
       authorization (TASK 014). VOD/live media has no authorized
       endpoint and is refused per-URL-class;
-    - direct_url (TASK 014): public http(s) links to video files
-      (.mp4/.webm/.mov) — SSRF-guarded streaming import; LAST in the
-      tuple so platform URLs are always claimed by their platform
-      adapter first.
+     - kick (TASK 015): OFFICIAL public-API METADATA only — materialization
+       refused (no official VOD media-download endpoint; same honesty class
+       as YouTube/Twitch VOD);
+     - direct_url (TASK 014): public http(s) links to video files
+       (.mp4/.webm/.mov) — SSRF-guarded streaming import; LAST in the
+       tuple so platform URLs are always claimed by their platform
+       adapter first.
     """
     return (
         UploadProvider(ffprobe_path),
@@ -105,6 +118,7 @@ def default_providers(
             config=_twitch_config_from(settings),
             ffprobe_path=ffprobe_path,
         ),
+        KickProvider(config=_kick_config_from(settings)),
         DirectUrlProvider(ffprobe_path,
                           config=_direct_url_config_from(settings)),
     )

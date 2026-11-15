@@ -209,3 +209,67 @@ class SupabaseStorage:
             m.observe_storage_failure("upload_clip")
             raise StorageUploadError("clip upload failed") from exc
         return size
+
+    # -- TASK 015 P4: deletion + existence (source retention / lifecycle) ------
+
+    async def object_exists(self, object_path: str, *, source: bool = True) -> bool | None:
+        """True/False when the object's presence is verified; None when the
+        check itself failed (network/transport) — callers must treat None as
+        "not verified" and must NOT report a deletion as confirmed.
+
+        Path shape is enforced exactly as for transfers: sources for
+        ``source=True``, clips otherwise. Only ever touches the private
+        buckets' canonical paths.
+        """
+        if source:
+            if not _SOURCE_PATH_PATTERN.match(object_path or ""):
+                raise StorageDownloadError("invalid object path")
+            bucket = SOURCES_BUCKET
+        else:
+            if not _CLIP_PATH_PATTERN.match(object_path or ""):
+                raise StorageUploadError("invalid object path")
+            bucket = CLIPS_BUCKET
+        try:
+            entries = await self._client.storage.from_(bucket).list(
+                object_path.rsplit("/", 1)[0], {"limit": 1000}
+            )
+        except Exception as exc:  # noqa: B001 — transport boundary
+            logger.warning("existence check failed for %s: %s", object_path, exc.__class__.__name__)
+            return None
+        name = object_path.rsplit("/", 1)[1]
+        for entry in entries or []:
+            if str(entry.get("name") or "") == name:
+                return True
+        return False
+
+    async def delete_object(self, object_path: str, *, source: bool = True) -> bool:
+        """Deletes ONE canonical object; returns True when the object was
+        gone (already or after this call) and the absence is VERIFIED.
+
+        Returns False when the absence could not be verified (transport
+        failure on the check) — the caller must NOT report success.
+        Raises on an invalid path shape (never deletes something it cannot
+        prove is a canonical worker-managed object). Idempotent: deleting an
+        already-missing object verifies absence and returns True.
+        """
+        if source:
+            if not _SOURCE_PATH_PATTERN.match(object_path or ""):
+                raise StorageDownloadError("invalid object path")
+            bucket = SOURCES_BUCKET
+        else:
+            if not _CLIP_PATH_PATTERN.match(object_path or ""):
+                raise StorageUploadError("invalid object path")
+            bucket = CLIPS_BUCKET
+        try:
+            await self._client.storage.from_(bucket).remove([object_path])
+        except Exception as exc:  # noqa: BLE001 — transport boundary
+            logger.warning("delete of %s failed: %s", object_path, exc.__class__.__name__)
+            from ..observability import metrics as m
+
+            m.observe_storage_failure("delete_object")
+            raise
+        verified = await self.object_exists(object_path, source=source)
+        if verified is not False:
+            logger.warning("deletion of %s NOT verified (exists=%s)", object_path, verified)
+            return False
+        return True

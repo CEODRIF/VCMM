@@ -27,13 +27,21 @@ export async function GET(request: Request, context: { params: { jobId: string }
     const downloadable = (c: (typeof clips)[number]) =>
       c.status === "ready" && validateClipPath(c.storage_path, job.id, c.id);
 
-    // ZIP feasibility for a COMPLETED job (metadata only — one listing).
-    // Lets the UI offer, explain-disable or hide "Download all" BEFORE the
-    // user clicks (size cap → clear per-clip fallback, no failed download).
+    // One metadata-only listing (no byte transfer) serves the ZIP size
+    // feasibility AND the live per-clip file sizes shown on the cards.
+    // Only a COMPLETED job has renderable clip objects — while the job is
+    // still moving through the pipeline the results page polls every few
+    // seconds, so a storage round-trip per poll would be pure waste (and
+    // the clip grid is not shown for non-terminal jobs at all).
+    const objects =
+      job.status === "completed" ? await listJobClipObjects(job.id) : new Map();
+
+    // ZIP feasibility for a COMPLETED job. Lets the UI offer,
+    // explain-disable or hide "Download all" BEFORE the user clicks
+    // (size cap → clear per-clip fallback, no failed download).
     let zip: { available: boolean; totalBytes: number; limitBytes: number } | undefined;
     if (job.status === "completed") {
       const limitBytes = uploadConfig.maxZipBytes();
-      const objects = await listJobClipObjects(job.id);
       const totalBytes = clips
         .filter(downloadable)
         .reduce((n, c) => n + (objects.get(`${c.id}.mp4`)?.size ?? 0), 0);
@@ -49,6 +57,18 @@ export async function GET(request: Request, context: { params: { jobId: string }
         completedAt: job.completed_at,
         /** Phase 6 retention marker: when the artifacts become eligible for cleanup. */
         expiresAt: job.expires_at,
+        /** Phase 6 / P4: set when ALL artifacts were purged (manual or user cleanup). */
+        purgedAt: job.purged_at,
+        /** TASK 015 P4: non-NULL = a user cleanup failed partway (visible + retryable). */
+        cleanupError: job.cleanup_error,
+        /** TASK 015 P3: the job's generation settings (display only). */
+        generationMode: job.generation_mode,
+        outputFps: job.output_fps,
+        sourceDurationSeconds:
+          typeof (job.source_metadata as Record<string, unknown> | null)?.duration_seconds ===
+          "number"
+            ? ((job.source_metadata as Record<string, unknown>).duration_seconds as number)
+            : null,
         clipsReady: clips.filter((c) => c.status === "ready").length,
       },
       clips: clips.map((c) => ({
@@ -58,6 +78,14 @@ export async function GET(request: Request, context: { params: { jobId: string }
         sortOrder: c.sort_order,
         status: c.status,
         downloadable: downloadable(c),
+        /** TASK 015 P4: exact source timestamps + measured output contract. */
+        startTime: c.start_time,
+        endTime: c.end_time,
+        mode: c.mode,
+        width: c.width,
+        height: c.height,
+        outputFps: c.output_fps,
+        fileSizeBytes: objects.get(`${c.id}.mp4`)?.size ?? c.file_size_bytes ?? null,
       })),
       zip,
     });

@@ -91,14 +91,19 @@ export async function createJob(input: CreateJobInput, sessionId: string): Promi
     const twitchUrl = input.twitchUrl ?? input.videoUrl;
     const kind = twitchUrl ? classifyVideoUrl(twitchUrl) : "unrecognized";
     if (kind === "twitch-clip") {
+      // TASK 015 P3: full_coverage derives its clip count at analysis
+      // time (requested_clips NULL — never a truncation); highlights
+      // carries the user's upper bound (schema guarantees 1..10).
       await insertJob({
         id,
         sessionId,
         sourceType: "twitch",
         sourceUrl: twitchUrl,
-        requestedClips: input.clipCount,
+        requestedClips: input.generationMode === "full_coverage" ? null : input.clipCount!,
         clipDurationSeconds: input.clipDurationSeconds,
         captionsEnabled: input.captionsEnabled,
+        generationMode: input.generationMode,
+        outputFps: input.outputFps ?? null,
         initialStatus: "queued",
       });
       return { id, status: "queued", createdAt };
@@ -108,6 +113,23 @@ export async function createJob(input: CreateJobInput, sessionId: string): Promi
       kind === "twitch-vod"
         ? "Twitch VOD media cannot be imported: the official Twitch APIs expose no authorized VOD media-download endpoint. Export the VOD from the Twitch dashboard and upload the file directly."
         : "This Twitch URL is a live stream, not a completed recording — wait for the VOD, or upload the file directly."
+    );
+  }
+
+  if (input.sourceType === "kick") {
+    // TASK 015 — Kick as a first-class source. The platform FACT is
+    // refused at creation (distinct actionable 503, no job row): the
+    // official Kick public API exposes METADATA only — there is no
+    // authorized VOD media-download endpoint (and VODs expire 14-30
+    // days after the broadcast ends). No scraping/DRM-bypass path may
+    // be added; the workarounds are export or direct upload.
+    const kickUrl = input.videoUrl;
+    const kind = kickUrl ? classifyVideoUrl(kickUrl) : "unrecognized";
+    throw new ApiError(
+      503,
+      kind === "kick-live"
+        ? "This Kick URL is a live stream, not a completed recording — wait for the VOD, or upload the file directly."
+        : "Kick VOD media cannot be imported: the official Kick API exposes metadata but no authorized VOD media-download endpoint (Kick VODs expire 14-30 days after the broadcast ends). Export the recording from Kick Studio and upload the file directly."
     );
   }
 
@@ -123,9 +145,11 @@ export async function createJob(input: CreateJobInput, sessionId: string): Promi
       sessionId,
       sourceType: "direct_url",
       sourceUrl: videoUrl,
-      requestedClips: input.clipCount,
+      requestedClips: input.generationMode === "full_coverage" ? null : input.clipCount!,
       clipDurationSeconds: input.clipDurationSeconds,
       captionsEnabled: input.captionsEnabled,
+      generationMode: input.generationMode,
+      outputFps: input.outputFps ?? null,
       initialStatus: "queued",
     });
     return { id, status: "queued", createdAt };
@@ -138,9 +162,11 @@ export async function createJob(input: CreateJobInput, sessionId: string): Promi
     sessionId,
     sourceType: "upload",
     sourcePath: `sources/${id}/reserved`,
-    requestedClips: input.clipCount,
+    requestedClips: input.generationMode === "full_coverage" ? null : input.clipCount!,
     clipDurationSeconds: input.clipDurationSeconds,
     captionsEnabled: input.captionsEnabled,
+    generationMode: input.generationMode,
+    outputFps: input.outputFps ?? null,
     initialStatus: "uploading",
   });
 

@@ -24,7 +24,7 @@ const TWITCH_VOD_PATH = /^\/(?:[a-z0-9_]{1,25}\/)?videos\/\d{1,15}$/;
 
 export const createJobSchema = z
   .object({
-    sourceType: z.enum(["youtube", "twitch", "upload", "direct_url"]),
+    sourceType: z.enum(["youtube", "twitch", "kick", "upload", "direct_url"]),
     youtubeUrl: httpUrl
       .optional()
       .refine((value) => {
@@ -59,15 +59,16 @@ export const createJobSchema = z
     /**
      * TASK 014 — universal "Video URL" input. A single pasted URL,
      * classified server-side (shape only) into youtube / twitch-vod /
-     * twitch-clip / twitch-live / direct-file. The service layer applies
-     * the honest capability gate per class (503 for what cannot be
-     * imported through an authorized mechanism; job creation for what can).
+     * twitch-clip / twitch-live / kick-vod / kick-live / direct-file.
+     * The service layer applies the honest capability gate per class
+     * (503 for what cannot be imported through an authorized mechanism;
+     * job creation for what can).
      */
     videoUrl: httpUrl
       .optional()
-      .refine((value) => value === undefined || classifyVideoUrl(value) !== "unrecognized", {
+       .refine((value) => value === undefined || classifyVideoUrl(value) !== "unrecognized", {
         message:
-          "must be a YouTube URL, a Twitch VOD/clip URL, or a direct video file URL (.mp4/.webm/.mov)",
+          "must be a YouTube URL, a Twitch VOD/clip URL, a Kick VOD URL, or a direct video file URL (.mp4/.webm/.mov)",
       })
       .optional(),
     fileName: z
@@ -78,27 +79,63 @@ export const createJobSchema = z
         message: "must be a plain file name",
       })
       .optional(),
-    clipCount: z.number().int().min(clips.minCount).max(clips.maxCount),
-    clipDurationSeconds: z.number().int().min(clips.minSeconds).max(clips.maxSeconds),
-    captionsEnabled: z.boolean().default(true),
-  })
-  .refine(
-    (data) => {
-      if (data.sourceType === "youtube") return Boolean(data.youtubeUrl);
-      if (data.sourceType === "twitch") return Boolean(data.twitchUrl ?? data.videoUrl);
-      if (data.sourceType === "direct_url") {
-        const videoUrl = data.videoUrl;
-        return videoUrl !== undefined && classifyVideoUrl(videoUrl) === "direct-file";
+     /**
+      * TASK 015 P3 — generation mode:
+      * - "highlights" (default): viral-highlight candidates; clipCount is
+      *   a required upper bound (1..10).
+      * - "full_coverage": the ENTIRE source tiled into sequential clips of
+      *   clipDurationSeconds; the count is DERIVED at analysis time
+      *   (ceil(duration / clipDurationSeconds)) — clipCount is optional and
+      *   never truncates coverage.
+      */
+     generationMode: z.enum(["highlights", "full_coverage"]).default("highlights"),
+     clipCount: z.number().int().min(clips.minCount).max(clips.maxCount).optional(),
+     clipDurationSeconds: z.number().int().min(clips.minSeconds).max(clips.maxSeconds),
+     /**
+      * TASK 015 P3 — explicit output frame rate. 30 | 60. null/omitted =
+      * legacy source-rate-preserving render (never exceeds the measured
+      * source rate; 60 from a low-rate source duplicates frames — honest).
+      */
+     outputFps: z.union([z.literal(30), z.literal(60)]).nullish(),
+     captionsEnabled: z.boolean().default(true),
+   })
+   .refine(
+     (data) => {
+        if (data.sourceType === "youtube") return Boolean(data.youtubeUrl);
+       if (data.sourceType === "twitch") return Boolean(data.twitchUrl ?? data.videoUrl);
+       if (data.sourceType === "kick") {
+         // TASK 015: Kick arrives via the universal videoUrl field and is
+         // classified shape-only; the service applies the honest gate.
+         const kind = data.videoUrl === undefined ? null : classifyVideoUrl(data.videoUrl);
+         return kind === "kick-vod" || kind === "kick-live";
+       }
+       if (data.sourceType === "direct_url") {
+         const videoUrl = data.videoUrl;
+         return videoUrl !== undefined && classifyVideoUrl(videoUrl) === "direct-file";
+       }
+        return Boolean(data.fileName);
+      },
+      {
+        message:
+          "youtube sourceType requires youtubeUrl; twitch requires twitchUrl; " +
+          "kick requires a Kick VOD or channel URL; " +
+          "direct_url requires a direct video file URL (.mp4/.webm/.mov); upload requires fileName",
+        path: ["sourceType"],
       }
-      return Boolean(data.fileName);
-    },
-    {
-      message:
-        "youtube sourceType requires youtubeUrl; twitch requires twitchUrl; " +
-        "direct_url requires a direct video file URL (.mp4/.webm/.mov); upload requires fileName",
-      path: ["sourceType"],
-    }
-  );
+   )
+   .refine(
+     // TASK 015 P3: highlights mode REQUIRES an explicit clip count (its
+     // upper bound); full_coverage derives the count (clipCount ignored).
+     (data) =>
+       data.generationMode !== "highlights" ||
+       (data.clipCount !== undefined &&
+         data.clipCount >= clips.minCount &&
+         data.clipCount <= clips.maxCount),
+     {
+       message: `highlights mode requires clipCount between ${clips.minCount} and ${clips.maxCount}`,
+       path: ["clipCount"],
+     }
+   );
 
 export type CreateJobInput = z.infer<typeof createJobSchema>;
 

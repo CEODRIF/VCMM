@@ -30,10 +30,14 @@ export type JobStatus =
 export interface JobRow {
   id: string;
   session_id: string;
-  source_type: "youtube" | "twitch" | "upload" | "direct_url";
+  source_type: "youtube" | "twitch" | "kick" | "upload" | "direct_url";
   source_url: string | null;
   source_path: string | null;
-  requested_clips: number;
+  requested_clips: number | null;
+  /** TASK 015 P3: 'highlights' | 'full_coverage'. */
+  generation_mode: "highlights" | "full_coverage";
+  /** TASK 015 P3: explicit output frame rate (30|60) or null (legacy auto). */
+  output_fps: number | null;
   clip_duration_seconds: number;
   captions_enabled: boolean;
   status: JobStatus;
@@ -42,6 +46,10 @@ export interface JobRow {
   created_at: string;
   completed_at: string | null;
   expires_at: string | null;
+  /** Phase 6: set when the job's artifacts were purged (manual or user cleanup). */
+  purged_at: string | null;
+  /** TASK 015 P4: non-NULL = a user cleanup failed partway (visible + retryable). */
+  cleanup_error: string | null;
   // Phase 3 — queue / ingestion
   attempt_count: number;
   max_attempts: number;
@@ -58,12 +66,21 @@ export interface JobRow {
 export interface NewJobInput {
   id: string;
   sessionId: string;
-  sourceType: "youtube" | "twitch" | "upload" | "direct_url";
+  sourceType: "youtube" | "twitch" | "kick" | "upload" | "direct_url";
   sourceUrl?: string;
   sourcePath?: string;
-  requestedClips: number;
+  /**
+   * TASK 015 P3: null = "derived at analysis time" (full_coverage mode —
+   * ceil(source_duration / clip_duration_seconds), never truncated by a
+   * user count); number (1..10) = highlights upper bound.
+   */
+  requestedClips: number | null;
   clipDurationSeconds: number;
   captionsEnabled: boolean;
+  /** TASK 015 P3: 'highlights' (default) | 'full_coverage'. */
+  generationMode?: "highlights" | "full_coverage";
+  /** TASK 015 P3: explicit output frame rate (30|60) or null (legacy auto). */
+  outputFps?: number | null;
   /** Initial state: upload jobs wait for the file ('uploading'); provider-backed jobs start 'queued'. */
   initialStatus: "uploading" | "queued";
 }
@@ -82,6 +99,8 @@ export async function insertJob(input: NewJobInput): Promise<{ id: string }> {
       requested_clips: input.requestedClips,
       clip_duration_seconds: input.clipDurationSeconds,
       captions_enabled: input.captionsEnabled,
+      generation_mode: input.generationMode ?? "highlights",
+      output_fps: input.outputFps ?? null,
       status: input.initialStatus,
       progress: 0,
     })

@@ -79,10 +79,73 @@ const STATE_META: Record<ProcessingState, StateMeta> = {
  *   - `live` = true: a real job fetched from /api/v1/jobs/[id] (Phase 2);
  *   - `live` = false: typed placeholder data for development (Phase 1).
  */
+
+function formatDuration(totalSeconds: number): string {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = Math.round(totalSeconds % 60);
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+}
+
+/**
+ * TASK 015 P3 — the expected clip count for the job's generation mode.
+ * full_coverage: ceil(sourceDuration / clipDuration) once the source has
+ * been probed (null before ingestion); highlights: the requested upper bound.
+ */
+function expectedClipCount(job: Job): number | null {
+  if (job.generationMode === "full_coverage") {
+    if (job.sourceDurationSeconds != null && job.clipDurationSeconds) {
+      return Math.ceil(job.sourceDurationSeconds / job.clipDurationSeconds);
+    }
+    return null;
+  }
+  return job.requestedClips;
+}
+
+function clipCountLabel(job: Job): string {
+  if (job.generationMode === "full_coverage") {
+    const count = expectedClipCount(job);
+    return count != null
+      ? `${count} clips expected (full video coverage)`
+      : "full video coverage — clip count derived from the source duration";
+  }
+  if (job.requestedClips != null) {
+    return `${job.requestedClips} ${job.requestedClips === 1 ? "clip" : "clips"} requested (viral highlights)`;
+  }
+  return "clips requested";
+}
+
 export function ProcessingPanel({ job, live = false }: { job: Job; live?: boolean }) {
   const meta = STATE_META[job.status];
   const Icon = meta.icon;
   const stateIndex = appConfig.processingStates.indexOf(job.status);
+  const expected = expectedClipCount(job);
+  const detected = job.clipsCount ?? 0;
+  const settingsRows: string[] = [];
+  if (job.generationMode != null) {
+    settingsRows.push(
+      `Mode: ${job.generationMode === "full_coverage" ? "Full video to reels" : "Viral highlights"}`
+    );
+  }
+  if (job.outputFps != null) {
+    settingsRows.push(`Output frame rate: ${job.outputFps} FPS (explicit)`);
+  }
+  if (job.sourceDurationSeconds != null) {
+    settingsRows.push(`Source duration: ${formatDuration(job.sourceDurationSeconds)}`);
+  }
+  if (expected != null) {
+    settingsRows.push(
+      job.generationMode === "full_coverage"
+        ? `Expected clips: ${expected} (full coverage, ${job.clipDurationSeconds ?? "?"}s each)`
+        : `Requested clips: ${expected} (upper bound)`
+    );
+  }
+  if (detected > 0) {
+    settingsRows.push(
+      job.generationMode === "full_coverage" && expected != null
+        ? `Cut so far: ${detected}/${expected} clips`
+        : `Cut so far: ${detected} clip${detected === 1 ? "" : "s"}`
+    );
+  }
 
   return (
     <div className="grid gap-6 lg:grid-cols-[1fr_320px]">
@@ -97,8 +160,10 @@ export function ProcessingPanel({ job, live = false }: { job: Job; live?: boolea
                   ? "Twitch source"
                   : job.sourceType === "direct_url"
                     ? "Imported video link"
-                    : "Uploaded file"} · {job.requestedClips}{" "}
-              {job.requestedClips === 1 ? "clip requested" : "clips requested"}
+                    : job.sourceType === "kick"
+                      ? "Kick source"
+                      : "Uploaded file"}{" "}
+              · {clipCountLabel(job)}
             </CardDescription>
           </div>
           <Badge variant={job.status === "failed" ? "destructive" : job.status === "completed" ? "default" : "secondary"}>
@@ -131,6 +196,27 @@ export function ProcessingPanel({ job, live = false }: { job: Job; live?: boolea
             <p className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive" role="alert">
               {job.errorMessage}
             </p>
+          )}
+
+          {settingsRows.length > 0 && (
+            <div className="flex flex-col gap-1 rounded-md border bg-background/40 p-3 text-xs text-muted-foreground">
+              <p className="font-medium text-foreground">Job settings</p>
+              {settingsRows.map((row) => (
+                <p key={row}>{row}</p>
+              ))}
+              {job.generationMode === "full_coverage" && (
+                <p className="text-muted-foreground/80">
+                  Every second of the source is covered in chronological order — no gaps, no skipped
+                  sections. A final remainder shorter than 10s is folded into the last full clip.
+                </p>
+              )}
+              {job.generationMode === "highlights" && (
+                <p className="text-muted-foreground/80">
+                  Clips are ranked by a transparent scoring model. A high score is an estimate of
+                  engagement potential — not a guarantee of virality.
+                </p>
+              )}
+            </div>
           )}
 
           {live ? (

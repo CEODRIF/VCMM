@@ -431,3 +431,96 @@ describe("validateTwitchUrl (client-side mirror)", () => {
     }
   });
 });
+
+
+describe("classifyVideoUrl — Kick (TASK 015 shape classifier)", () => {
+  it("classifies Kick VOD and live/channel URL forms", () => {
+    expect(classifyVideoUrl("https://kick.com/somechannel/v/1234567890")).toBe("kick-vod");
+    expect(classifyVideoUrl("https://www.kick.com/somechannel/v/1234567890")).toBe("kick-vod");
+    expect(classifyVideoUrl("https://m.kick.com/somechannel/v/1234567890/")).toBe("kick-vod");
+    expect(classifyVideoUrl("https://kick.com/somechannel")).toBe("kick-live");
+    expect(classifyVideoUrl("https://www.kick.com/somechannel/")).toBe("kick-live");
+  });
+
+  it("never confuses lookalike Kick domains (dot-boundary matching)", () => {
+    expect(classifyVideoUrl("https://not-kick.com/a/v/1")).toBe("unrecognized");
+    expect(classifyVideoUrl("https://kick.com.evil.example/a/v/1")).toBe("unrecognized");
+    expect(classifyVideoUrl("https://evil-kick.com/a/v/1")).toBe("unrecognized");
+    // A video file on a lookalike host is a direct file (guard at transfer).
+    expect(classifyVideoUrl("https://storage.notkick.com/v.mp4")).toBe("direct-file");
+  });
+
+  it("rejects non-VOD, non-channel Kick paths and malformed forms", () => {
+    expect(classifyVideoUrl("https://kick.com/tv/fps")).toBe("unrecognized");
+    expect(classifyVideoUrl("https://kick.com/")).toBe("unrecognized");
+    expect(classifyVideoUrl("https://kick.com/a/v/abc")).toBe("unrecognized");
+    expect(classifyVideoUrl("ftp://kick.com/a/v/1")).toBe("unrecognized");
+    expect(classifyVideoUrl("https://kick.com:8443/a/v/1")).toBe("unrecognized");
+    expect(classifyVideoUrl("https://user:pass@kick.com/a/v/1")).toBe("unrecognized");
+  });
+});
+
+describe("POST /api/v1/jobs — Kick provider (TASK 015 honest gates)", () => {
+  it("refuses Kick VOD jobs with an actionable 503 (no official media endpoint)", async () => {
+    const response = await POST_JOBS(
+      requestWithSession({
+        sourceType: "kick",
+        videoUrl: "https://kick.com/somechannel/v/1234567890",
+        ...clipFields,
+      })
+    );
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as { error?: string };
+    // The refusal names the platform fact + the workarounds, never a pretend import.
+    expect(body.error).toMatch(/no authorized VOD media-download endpoint/i);
+    expect(body.error).toMatch(/Kick Studio/i);
+    expect(body.error).toMatch(/upload the file directly/i);
+    // no job row may be created for a refused Kick VOD
+    expect(insertMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses Kick live/channel URLs with a distinct actionable 503", async () => {
+    const response = await POST_JOBS(
+      requestWithSession({
+        sourceType: "kick",
+        videoUrl: "https://kick.com/somechannel",
+        ...clipFields,
+      })
+    );
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as { error?: string };
+    expect(body.error).toMatch(/live stream/i);
+    expect(insertMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-Kick URLs for kick sourceType with 400 (classification)", async () => {
+    for (const videoUrl of [
+      "https://twitch.tv/videos/123",
+      "https://storage.example.com/v.mp4",
+      "https://kick.com/tv/fps",
+      "not a url",
+    ]) {
+      const response = await POST_JOBS(
+        requestWithSession({ sourceType: "kick", videoUrl, ...clipFields })
+      );
+      expect(response.status, videoUrl).toBe(400);
+      expect(insertMock).not.toHaveBeenCalled();
+      vi.clearAllMocks();
+      findSessionMock.mockResolvedValue({ id: SESSION_ID, expires_at: FUTURE });
+      insertMock.mockResolvedValue({ id: JOB_ID });
+      jobCreationRateLimiter.resetAll();
+    }
+  });
+
+  it("requires a verified session for kick jobs (401 without one)", async () => {
+    const response = await POST_JOBS(
+      requestWithoutSession({
+        sourceType: "kick",
+        videoUrl: "https://kick.com/somechannel/v/1234567890",
+        ...clipFields,
+      })
+    );
+    expect(response.status).toBe(401);
+    expect(insertMock).not.toHaveBeenCalled();
+  });
+});
