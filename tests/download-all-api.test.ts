@@ -93,6 +93,7 @@ function clipRow(overrides: Partial<ClipRow> = {}): ClipRow {
     sort_order: 0,
     status: "ready",
     storage_path: `clips/${JOB_ID}/${CLIP_ID_A}.mp4`,
+    mode: "highlights",
     ...overrides,
   };
 }
