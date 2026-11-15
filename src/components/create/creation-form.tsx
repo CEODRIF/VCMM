@@ -356,38 +356,38 @@ export function CreationForm() {
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-5">
-          <div className="flex flex-wrap gap-2" role="tablist" aria-label="Source type">
-            {(
-              [
-                { value: "youtube", label: "YouTube URL", icon: <Youtube size={15} /> },
-                { value: "twitch", label: "Twitch VOD", icon: <Twitch size={15} /> },
-                { value: "video", label: "Video URL", icon: <Link2 size={15} /> },
-                { value: "upload", label: "Upload file", icon: <Upload size={15} /> },
-              ] as const
-            ).map((tab) => (
-              <button
-                key={tab.value}
-                type="button"
-                role="tab"
-                aria-selected={sourceType === tab.value}
-                disabled={busy}
-                onClick={() => {
-                  setSourceType(tab.value);
-                  setErrors((previous) => ({ ...previous, source: undefined }));
-                  resetTransientState();
-                }}
-                className={cn(
-                  "flex items-center gap-2 rounded-md border px-4 py-2 text-sm font-medium transition-colors disabled:opacity-60",
-                  sourceType === tab.value
-                    ? "border-primary/50 bg-primary/15 text-accent-foreground"
-                    : "border-input bg-background/40 text-muted-foreground hover:text-foreground"
-                )}
-              >
-                {tab.icon}
-                {tab.label}
-              </button>
-            ))}
-          </div>
+           <div className="glass inline-flex max-w-full flex-wrap gap-1 rounded-2xl p-1" role="tablist" aria-label="Source type">
+             {(
+               [
+                 { value: "youtube", label: "YouTube", icon: <Youtube size={15} /> },
+                 { value: "twitch", label: "Twitch VOD", icon: <Twitch size={15} /> },
+                 { value: "video", label: "Video URL", icon: <Link2 size={15} /> },
+                 { value: "upload", label: "Upload", icon: <Upload size={15} /> },
+               ] as const
+             ).map((tab) => (
+               <button
+                 key={tab.value}
+                 type="button"
+                 role="tab"
+                 aria-selected={sourceType === tab.value}
+                 disabled={busy}
+                 onClick={() => {
+                   setSourceType(tab.value);
+                   setErrors((previous) => ({ ...previous, source: undefined }));
+                   resetTransientState();
+                 }}
+                 className={cn(
+                   "flex items-center gap-2 rounded-xl px-3.5 py-2 text-[13px] font-medium transition-all duration-200 ease-premium active:scale-[0.97] disabled:opacity-60 sm:px-4 sm:text-sm",
+                   sourceType === tab.value
+                     ? "bg-accent text-accent-foreground shadow-sm"
+                     : "text-muted-foreground hover:text-foreground"
+                 )}
+               >
+                 {tab.icon}
+                 {tab.label}
+               </button>
+             ))}
+           </div>
 
           {sourceType === "youtube" ? (
             <div className="flex flex-col gap-2">
@@ -509,8 +509,8 @@ export function CreationForm() {
                 }}
               />
 
-              {uploadStage !== "idle" && createdJobId && (
-                <div className="flex flex-col gap-2 rounded-md border bg-background/40 p-4">
+               {uploadStage !== "idle" && createdJobId && (
+                 <div className="glass flex flex-col gap-2.5 rounded-xl p-4 animate-scale-in">
                   <div className="flex items-center justify-between text-sm">
                     <span className="font-medium">
                       {uploadStage === "transferring" ? "Uploading to private storage…" : "Verifying upload…"}
@@ -577,30 +577,39 @@ export function CreationForm() {
                     desc: `Every second, tiled into sequential ${duration}s clips in order. Count = ceil(source ÷ ${duration}s).`,
                   },
                 ] as const
-              ).map((option) => (
-                <label
-                  key={option.id}
-                  className={
-                    "flex cursor-pointer flex-col gap-1 rounded-md border p-3 text-sm transition-colors " +
-                    (mode === option.id
-                      ? "border-primary bg-primary/5"
-                      : "bg-background/40 hover:bg-background/70")
-                  }
-                >
-                  <span className="flex items-center gap-2 font-medium">
-                    <input
-                      type="radio"
-                      name="generation-mode"
-                      className="accent-primary"
-                      checked={mode === option.id}
-                      disabled={busy}
-                      onChange={() => setMode(option.id)}
-                    />
-                    {option.title}
-                  </span>
-                  <span className="pl-6 text-xs text-muted-foreground">{option.desc}</span>
-                </label>
-              ))}
+               ).map((option) => (
+                 <label
+                   key={option.id}
+                   className={cn(
+                     "group flex cursor-pointer flex-col gap-1.5 rounded-xl border p-3.5 text-sm transition-all duration-200 ease-premium has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring has-[:focus-visible]:ring-offset-2 has-[:focus-visible]:ring-offset-background",
+                     mode === option.id
+                       ? "border-primary/60 bg-primary/10 shadow-sm"
+                       : "border-input bg-background/40 hover:border-input/70 hover:bg-background/70"
+                   )}
+                 >
+                   <span className="flex items-center gap-2.5 font-medium">
+                     <span
+                       aria-hidden
+                       className={cn(
+                         "flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-all duration-200",
+                         mode === option.id ? "border-primary bg-primary" : "border-muted-foreground/50 bg-transparent group-hover:border-muted-foreground"
+                       )}
+                     >
+                       {mode === option.id && <span className="h-1.5 w-1.5 rounded-full bg-primary-foreground" />}
+                     </span>
+                     <input
+                       type="radio"
+                       name="generation-mode"
+                       className="sr-only"
+                       checked={mode === option.id}
+                       disabled={busy}
+                       onChange={() => setMode(option.id)}
+                     />
+                     {option.title}
+                   </span>
+                   <span className="pl-[26px] text-xs leading-relaxed text-muted-foreground">{option.desc}</span>
+                 </label>
+               ))}
             </div>
           </div>
 
@@ -626,7 +635,7 @@ export function CreationForm() {
               )}
             </div>
           ) : (
-            <div className="flex flex-col gap-1 rounded-md border bg-background/40 p-3 text-xs text-muted-foreground">
+            <div className="flex flex-col gap-1 rounded-xl border bg-background/40 p-3.5 text-xs text-muted-foreground">
               <p className="font-medium text-foreground">Expected clip count</p>
               <p>
                 ceil(source duration ÷ {duration}s) — computed from the real source length once
@@ -684,19 +693,19 @@ export function CreationForm() {
           <div className="flex flex-col gap-2">
             <p className="text-sm font-medium">Output format (fixed by the product spec)</p>
             <div className="grid grid-cols-3 gap-2 text-center text-xs">
-              <div className="rounded-md border bg-background/40 px-2 py-2">
-                <p className="font-semibold text-foreground">{output.aspectRatio}</p>
-                <p className="text-muted-foreground">Vertical</p>
+              <div className="rounded-xl border bg-background/40 px-2 py-2.5">
+                <p className="font-semibold tracking-tight text-foreground">{output.aspectRatio}</p>
+                <p className="mt-0.5 text-muted-foreground">Vertical</p>
               </div>
-              <div className="rounded-md border bg-background/40 px-2 py-2">
-                <p className="font-semibold text-foreground">
+              <div className="rounded-xl border bg-background/40 px-2 py-2.5">
+                <p className="font-semibold tracking-tight text-foreground">
                   {output.width}x{output.height}
                 </p>
-                <p className="text-muted-foreground">Pixels</p>
+                <p className="mt-0.5 text-muted-foreground">Pixels</p>
               </div>
-              <div className="rounded-md border bg-background/40 px-2 py-2">
-                <p className="font-semibold text-foreground">{output.resolutionLabel}</p>
-                <p className="text-muted-foreground">Resolution</p>
+              <div className="rounded-xl border bg-background/40 px-2 py-2.5">
+                <p className="font-semibold tracking-tight text-foreground">{output.resolutionLabel}</p>
+                <p className="mt-0.5 text-muted-foreground">Resolution</p>
               </div>
             </div>
           </div>
@@ -750,11 +759,11 @@ export function CreationForm() {
             )}
           </Button>
 
-          <p className="flex items-start gap-2 text-xs text-muted-foreground">
-            <Info size={13} className="mt-0.5 shrink-0" />
-            Uploads go directly to private storage and are verified server-side; the worker validates
-            the media with FFprobe (Phase 3). AI transcription and clip detection arrive in Phase 4.
-          </p>
+           <p className="flex items-start gap-2 text-xs leading-relaxed text-muted-foreground">
+             <Info size={13} className="mt-0.5 shrink-0" />
+             Uploads go directly to private storage and are verified server-side; the worker validates
+             the media with FFprobe, then transcribes, analyzes and renders your clips.
+           </p>
         </CardContent>
       </Card>
     </form>

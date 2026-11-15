@@ -157,24 +157,26 @@ export function ClipCard({
 
   return (
     <div
-      className="flex animate-fade-in flex-col overflow-hidden rounded-lg border bg-card"
+      className="card-surface hover-lift flex animate-fade-in flex-col overflow-hidden rounded-2xl border-border/70"
       style={{ animationDelay: `${index * 60}ms` }}
     >
       {/* 9:16 preview */}
-      <div className="relative flex aspect-[9/16] w-full items-center justify-center bg-gradient-to-br from-accent to-secondary">
+      <div className="relative flex aspect-[9/16] w-full items-center justify-center bg-gradient-to-br from-accent/80 via-card to-secondary">
         {preview.status === "ready" && (
           <video
             src={preview.url}
             controls
             preload="metadata"
             playsInline
-            className="h-full w-full bg-black object-contain"
+            className="h-full w-full bg-black/80 object-contain"
             aria-label={`Clip preview: ${clip.title}`}
           />
         )}
         {preview.status === "loading" && clip.downloadable && (
-          <span className="flex items-center gap-2 text-sm text-muted-foreground" role="status">
-            <Loader2 size={16} className="animate-spin" aria-hidden /> Loading preview…
+          <span className="absolute inset-0 flex flex-col items-center justify-center gap-2" role="status">
+            <span className="absolute inset-0 animate-pulse bg-muted/30" aria-hidden />
+            <Loader2 size={18} className="relative animate-spin text-muted-foreground" aria-hidden />
+            <span className="sr-only">Loading preview…</span>
           </span>
         )}
         {preview.status === "error" && (
@@ -192,8 +194,8 @@ export function ClipCard({
             )}
           </span>
         )}
-        <Badge className="absolute left-3 top-3">{formatDurationSeconds(clip.duration)}</Badge>
-        <span className="absolute bottom-3 right-3 text-[10px] uppercase tracking-wide text-foreground/50">
+        <Badge className="glass-raised absolute left-3 top-3 rounded-full px-2.5">{formatDurationSeconds(clip.duration)}</Badge>
+        <span className="absolute bottom-3 right-3 rounded-full bg-black/50 px-2 py-0.5 text-[10px] uppercase tracking-wide text-foreground/70 backdrop-blur-sm">
           {resolution ? `${resolution} · 9:16` : "9:16"}
         </span>
       </div>

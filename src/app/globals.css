@@ -4,36 +4,50 @@
 
 @layer base {
   :root {
-    /* Premium dark theme: charcoal surfaces with a subtle violet accent. */
-    --background: 240 12% 5%;
-    --foreground: 240 8% 96%;
+    /* TASK 016 — refined dark theme: near-charcoal surfaces, soft violet
+       accent, elevated layering. Values are HSL triplets consumed by the
+       Tailwind color tokens in tailwind.config.ts. */
+    --background: 240 14% 4%;
+    --foreground: 240 10% 97%;
 
-    --card: 240 10% 8%;
-    --card-foreground: 240 8% 96%;
+    --card: 240 12% 7%;
+    --card-foreground: 240 10% 97%;
 
-    --popover: 240 10% 8%;
-    --popover-foreground: 240 8% 96%;
+    --popover: 240 12% 8%;
+    --popover-foreground: 240 10% 97%;
 
-    --primary: 262 83% 62%;
+    --primary: 258 90% 66%;
     --primary-foreground: 0 0% 100%;
 
-    --secondary: 240 8% 14%;
-    --secondary-foreground: 240 8% 96%;
+    --secondary: 240 10% 14%;
+    --secondary-foreground: 240 10% 96%;
 
-    --muted: 240 8% 14%;
-    --muted-foreground: 240 5% 64%;
+    --muted: 240 10% 14%;
+    --muted-foreground: 240 6% 66%;
 
-    --accent: 262 45% 18%;
-    --accent-foreground: 262 60% 88%;
+    --accent: 258 50% 16%;
+    --accent-foreground: 258 65% 90%;
 
-    --destructive: 0 72% 56%;
+    --destructive: 0 74% 58%;
     --destructive-foreground: 0 0% 98%;
 
-    --border: 240 8% 15%;
-    --input: 240 8% 18%;
-    --ring: 262 83% 62%;
+    --border: 240 10% 16%;
+    --input: 240 10% 20%;
+    --ring: 258 90% 66%;
 
+    /* Radius scale: 0.5 / 0.75 / 1 (sm/md/lg) / 1.25 (xl) / 1.5 (2xl) */
     --radius: 0.75rem;
+
+    /* Liquid glass recipe (used by .glass / .glass-raised). */
+    --glass-bg: hsl(240 12% 9% / 0.6);
+    --glass-border: hsl(240 20% 90% / 0.08);
+    --glass-highlight: hsl(240 30% 100% / 0.06);
+
+    /* Elevation (used by .hover-lift and card shadows). */
+    --shadow-glass: 0 1px 0 0 hsl(240 30% 100% / 0.05) inset,
+      0 12px 32px -12px hsl(240 40% 2% / 0.6);
+    --shadow-lift: 0 2px 6px -2px hsl(240 40% 2% / 0.4),
+      0 12px 24px -12px hsl(240 40% 2% / 0.5);
   }
 
   * {
@@ -46,6 +60,37 @@
 
   body {
     @apply bg-background text-foreground antialiased;
+    font-feature-settings: "cv11", "ss01";
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Refined selection + scrollbars (dark, unobtrusive). */
+  ::selection {
+    background: hsl(var(--primary) / 0.3);
+    color: hsl(var(--foreground));
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(240 8% 24%);
+    border-radius: 999px;
+    border: 2px solid hsl(240 14% 4%);
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(240 8% 32%);
+  }
+
+  /* One visible focus style for every interactive element. */
+  :focus-visible {
+    outline: 2px solid hsl(var(--ring) / 0.7);
+    outline-offset: 2px;
+    border-radius: 0.25rem;
   }
 }
 
@@ -53,13 +98,70 @@
   /* Subtle violet glow used behind the hero and primary cards. */
   .glow-primary {
     background: radial-gradient(
-      ellipse 60% 45% at 50% 0%,
-      hsl(var(--primary) / 0.16),
-      transparent 70%
+      ellipse 65% 45% at 50% 0%,
+      hsl(var(--primary) / 0.14),
+      transparent 72%
     );
   }
 
+  /* Primary content surface — clean, mostly opaque, quiet border.
+     (Deliberately NOT glass: readability first.) */
   .card-surface {
-    @apply border bg-card/80 backdrop-blur-sm;
+    @apply border bg-card;
+    box-shadow: 0 1px 0 0 hsl(240 30% 100% / 0.04) inset,
+      0 10px 30px -18px hsl(240 40% 2% / 0.55);
+  }
+
+  /* Liquid glass — for floating/layered surfaces (header, badges, alerts,
+     empty states). Translucent fill + blur + hairline border + top
+     highlight; contrast keeps text fully readable over busy backgrounds. */
+  .glass {
+    background: var(--glass-bg);
+    backdrop-filter: blur(16px) saturate(1.4);
+    -webkit-backdrop-filter: blur(16px) saturate(1.4);
+    border: 1px solid var(--glass-border);
+    box-shadow: var(--shadow-glass);
+  }
+
+  /* Stronger glass for floating controls that overlay content. */
+  .glass-raised {
+    background: hsl(240 12% 10% / 0.78);
+    backdrop-filter: blur(20px) saturate(1.5);
+    -webkit-backdrop-filter: blur(20px) saturate(1.5);
+    border: 1px solid hsl(240 20% 90% / 0.1);
+    box-shadow: var(--shadow-glass);
+  }
+
+  /* Restrained hover elevation for cards/tiles (desktop only). */
+  .hover-lift {
+    transition:
+      transform 200ms cubic-bezier(0.22, 1, 0.36, 1),
+      box-shadow 200ms cubic-bezier(0.22, 1, 0.36, 1),
+      border-color 200ms ease;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .hover-lift:hover {
+      transform: translateY(-2px);
+      box-shadow: var(--shadow-lift);
+    }
+  }
+}
+
+/* TASK 016 — reduced motion: disable decorative animation/transitions.
+   Functional state changes (colors, visibility) still apply instantly. */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  .animate-fade-in,
+  .animate-fade-in-up,
+  .animate-scale-in,
+  .animate-pulse-soft,
+  .hover-lift {
+    animation: none !important;
+    transition: none !important;
+  }
+  .hover-lift:hover {
+    transform: none;
   }
 }

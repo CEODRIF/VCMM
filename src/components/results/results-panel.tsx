@@ -13,9 +13,10 @@ import {
 } from "lucide-react";
 
 import { ClipCard } from "@/components/results/clip-card";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   canCleanup,
   cleanupIncomplete,
@@ -34,9 +35,28 @@ const POLL_INTERVAL_MS = 2500;
 
 function CenterCard({ children }: { children: React.ReactNode }) {
   return (
-    <Card className="card-surface">
-      <CardContent className="flex flex-col items-center gap-4 py-12 text-center">{children}</CardContent>
+    <Card className="card-surface animate-fade-in">
+      <CardContent className="flex flex-col items-center gap-4 py-16 text-center">{children}</CardContent>
     </Card>
+  );
+}
+
+/** TASK 016 — skeleton grid while the first results fetch is in flight. */
+function ResultsSkeleton() {
+  return (
+    <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4" aria-hidden>
+      {Array.from({ length: 4 }).map((_, i) => (
+        <div key={i} className="card-surface flex flex-col overflow-hidden rounded-2xl">
+          <Skeleton className="aspect-[9/16] w-full rounded-none" />
+          <div className="flex flex-col gap-2 p-4">
+            <Skeleton className="h-3 w-16" />
+            <Skeleton className="h-4 w-3/4" />
+            <Skeleton className="h-3 w-full" />
+            <Skeleton className="h-8 w-full rounded-lg" />
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -147,23 +167,23 @@ export function ResultsPanel({ jobId }: { jobId: string }) {
 
   if (state.phase === "loading") {
     return (
-      <CenterCard>
-        <Loader2 size={18} className="animate-spin text-muted-foreground" aria-hidden />
-        <p className="text-sm text-muted-foreground" role="status">
+      <div aria-busy="true" aria-label="Loading your results">
+        <ResultsSkeleton />
+        <p className="sr-only" role="status">
           Loading your results…
         </p>
-      </CenterCard>
+      </div>
     );
   }
 
   if (state.phase === "auth-required") {
     return (
       <CenterCard>
-        <p className="text-sm text-muted-foreground">Your session is not active, so your results cannot be shown.</p>
-        <Link
-          href="/access"
-          className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow transition-colors hover:bg-primary/90"
-        >
+        <span className="glass flex h-12 w-12 items-center justify-center rounded-2xl text-muted-foreground">
+          <Film size={20} strokeWidth={1.75} aria-hidden />
+        </span>
+        <p className="max-w-sm text-sm text-muted-foreground">Your session is not active, so your results cannot be shown.</p>
+        <Link href="/access" className={buttonVariants()}>
           Enter your access code
         </Link>
       </CenterCard>
@@ -173,14 +193,13 @@ export function ResultsPanel({ jobId }: { jobId: string }) {
   if (state.phase === "not-found") {
     return (
       <CenterCard>
-        <Film size={28} className="text-muted-foreground" aria-hidden />
-        <p className="text-sm text-muted-foreground">
+        <span className="glass flex h-12 w-12 items-center justify-center rounded-2xl text-muted-foreground">
+          <Film size={20} strokeWidth={1.75} aria-hidden />
+        </span>
+        <p className="max-w-sm text-sm text-muted-foreground">
           Results not found. This job may have expired or belongs to a different session.
         </p>
-        <Link
-          href="/processing"
-          className="inline-flex items-center gap-2 text-sm font-medium text-primary hover:underline"
-        >
+        <Link href="/processing" className={buttonVariants({ variant: "outline" })}>
           <RefreshCw size={14} aria-hidden /> Back to the overview
         </Link>
       </CenterCard>
@@ -190,9 +209,11 @@ export function ResultsPanel({ jobId }: { jobId: string }) {
   if (state.phase === "error") {
     return (
       <CenterCard>
-        <AlertTriangle size={28} className="text-muted-foreground" aria-hidden />
-        <p className="text-sm text-muted-foreground">{state.message}</p>
-        <Button variant="outline" size="sm" onClick={() => setRetry((k) => k + 1)}>
+        <span className="flex h-12 w-12 items-center justify-center rounded-2xl border border-destructive/40 bg-destructive/10 text-destructive">
+          <AlertTriangle size={20} strokeWidth={1.75} aria-hidden />
+        </span>
+        <p className="max-w-sm text-sm text-muted-foreground">{state.message}</p>
+        <Button variant="outline" onClick={() => setRetry((k) => k + 1)}>
           <RefreshCw size={14} aria-hidden /> Try again
         </Button>
       </CenterCard>
@@ -203,11 +224,16 @@ export function ResultsPanel({ jobId }: { jobId: string }) {
     const { data } = state;
     return (
       <CenterCard>
-        <Loader2 size={28} className="animate-spin text-primary" aria-hidden />
+        <span className="glass flex h-14 w-14 items-center justify-center rounded-2xl text-primary">
+          <Loader2 size={22} className="animate-spin" aria-hidden />
+        </span>
         <div className="w-full max-w-sm">
           <div className="mb-2 flex items-center justify-between text-sm">
-            <span className="font-medium">Your clips are being rendered</span>
-            <span className="text-muted-foreground">{Math.round(data.job.progress)}%</span>
+            <span className="flex items-center gap-2 font-medium">
+              <span aria-hidden className="h-2 w-2 animate-pulse-soft rounded-full bg-primary" />
+              Your clips are being rendered
+            </span>
+            <span className="tabular-nums text-muted-foreground">{Math.round(data.job.progress)}%</span>
           </div>
           <Progress value={data.job.progress} />
         </div>
@@ -225,7 +251,9 @@ export function ResultsPanel({ jobId }: { jobId: string }) {
   if (state.phase === "failed") {
     return (
       <CenterCard>
-        <AlertTriangle size={28} className="text-muted-foreground" aria-hidden />
+        <span className="flex h-12 w-12 items-center justify-center rounded-2xl border border-destructive/40 bg-destructive/10 text-destructive">
+          <AlertTriangle size={20} strokeWidth={1.75} aria-hidden />
+        </span>
         <div>
           <p className="text-sm font-medium">This job did not finish</p>
           <p className="mt-1 text-sm text-muted-foreground">
@@ -233,13 +261,10 @@ export function ResultsPanel({ jobId }: { jobId: string }) {
           </p>
         </div>
         <div className="flex flex-wrap items-center justify-center gap-3">
-          <Button variant="outline" size="sm" onClick={() => setRetry((k) => k + 1)}>
+          <Button variant="outline" onClick={() => setRetry((k) => k + 1)}>
             <RefreshCw size={14} aria-hidden /> Try again
           </Button>
-          <Link
-            href="/"
-            className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow transition-colors hover:bg-primary/90"
-          >
+          <Link href="/" className={buttonVariants()}>
             Start a new video
           </Link>
         </div>
@@ -280,7 +305,7 @@ export function ResultsPanel({ jobId }: { jobId: string }) {
               href={`/api/v1/jobs/${data.job.id}/download-all`}
               target="_blank"
               rel="noopener"
-              className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow transition-colors hover:bg-primary/90"
+              className={buttonVariants({ className: "h-10 rounded-xl" })}
             >
               <FileArchive size={16} aria-hidden />
               Download all (ZIP){zip.totalBytes > 0 ? ` · ${formatBytes(zip.totalBytes)}` : ""}
@@ -317,7 +342,7 @@ export function ResultsPanel({ jobId }: { jobId: string }) {
       {confirmCleanup && !cleanupBusy && (
         <div
           role="alert"
-          className="flex items-start gap-3 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive"
+          className="glass animate-scale-in flex items-start gap-3 rounded-xl border border-destructive/40 bg-destructive/10 p-3.5 text-sm text-destructive"
         >
           <Trash2 size={16} className="mt-0.5 shrink-0" aria-hidden />
           <p>
@@ -330,7 +355,7 @@ export function ResultsPanel({ jobId }: { jobId: string }) {
       {cleanupFailed && (
         <div
           role="alert"
-          className="flex flex-wrap items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300"
+          className="glass animate-fade-in flex flex-wrap items-start gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 p-3.5 text-sm text-amber-700 dark:text-amber-300"
         >
           <AlertTriangle size={16} className="mt-0.5 shrink-0" aria-hidden />
           <p className="min-w-0 flex-1">
@@ -346,7 +371,7 @@ export function ResultsPanel({ jobId }: { jobId: string }) {
       {expired && (
         <div
           role="alert"
-          className="flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300"
+          className="glass flex items-start gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 p-3.5 text-sm text-amber-700 dark:text-amber-300"
         >
           <CalendarClock size={16} className="mt-0.5 shrink-0" aria-hidden />
           <p>
@@ -358,16 +383,15 @@ export function ResultsPanel({ jobId }: { jobId: string }) {
 
       {clips.length === 0 ? (
         <CenterCard>
-          <Film size={28} className="text-muted-foreground" aria-hidden />
-          <p className="text-sm text-muted-foreground">
+          <span className="glass flex h-12 w-12 items-center justify-center rounded-2xl text-muted-foreground">
+            <Film size={20} strokeWidth={1.75} aria-hidden />
+          </span>
+          <p className="max-w-md text-sm text-muted-foreground">
             {purged
               ? "All generated clips and the source file for this job have been permanently deleted."
               : "No clips are available to download for this job."}
           </p>
-          <Link
-            href="/"
-            className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow transition-colors hover:bg-primary/90"
-          >
+          <Link href="/" className={buttonVariants()}>
             Try another video
           </Link>
         </CenterCard>
