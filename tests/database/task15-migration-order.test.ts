@@ -180,8 +180,15 @@ describe("TASK 015 migration order: clean install", () => {
   });
 
   it("applies ALL migrations in order to an empty database", async () => {
-    expect(ALL_MIGRATIONS).toHaveLength(15);
-    expect(TASK15_MIGRATIONS).toEqual(ALL_MIGRATIONS.slice(-4));
+    // 16 = 11 pre-TASK-015 + 4 TASK 015 + 1 TASK 017 (stale-upload reaper).
+    expect(ALL_MIGRATIONS).toHaveLength(16);
+    expect(ALL_MIGRATIONS.at(-1)).toBe("20261131000000_task17_stale_upload_reaper.sql");
+    expect(TASK15_MIGRATIONS).toEqual(ALL_MIGRATIONS.slice(-5, -1));
+    // The reaper RPC is part of the final contract.
+    const funcs = await db.query(
+      "select count(*)::int as n from pg_proc p join pg_namespace ns on ns.oid = p.pronamespace where ns.nspname = 'public' and p.proname = 'reap_stale_uploading_jobs'"
+    );
+    expect(Number((funcs.rows[0] as { n: number }).n)).toBe(1);
   });
 
   it("reaches the TASK 014 + TASK 015 final contract", async () => {

@@ -2,7 +2,7 @@ import "server-only";
 
 import { randomUUID } from "node:crypto";
 
-import { insertJob } from "@/lib/db/jobs";
+import { findActiveJobForSourceUrl, insertJob } from "@/lib/db/jobs";
 import { ApiError } from "@/lib/api/errors";
 import { getYouTubeProvider } from "@/lib/providers/youtube";
 import { classifyVideoUrl } from "@/lib/validation/clips";
@@ -91,6 +91,16 @@ export async function createJob(input: CreateJobInput, sessionId: string): Promi
     const twitchUrl = input.twitchUrl ?? input.videoUrl;
     const kind = twitchUrl ? classifyVideoUrl(twitchUrl) : "unrecognized";
     if (kind === "twitch-clip") {
+      // TASK 017: a double submission (double-click, two tabs) must not
+      // enqueue the same clip twice — answer 409 while the first job is
+      // still active; a finished/failed job may be re-submitted.
+      const duplicate = await findActiveJobForSourceUrl(sessionId, twitchUrl!);
+      if (duplicate) {
+        throw new ApiError(
+          409,
+          "You already have an active job for this video. Check its progress, or wait for it to finish before creating another one."
+        );
+      }
       // TASK 015 P3: full_coverage derives its clip count at analysis
       // time (requested_clips NULL — never a truncation); highlights
       // carries the user's upper bound (schema guarantees 1..10).
@@ -140,6 +150,19 @@ export async function createJob(input: CreateJobInput, sessionId: string): Promi
     // the object in the private sources bucket — the same pipeline as
     // uploads below the provider.
     const videoUrl = input.videoUrl;
+    if (typeof videoUrl !== "string") {
+      // The payload validator guarantees this for direct_url; the explicit
+      // narrow keeps the guard call type-safe.
+      throw new ApiError(400, "A direct video URL is required.");
+    }
+    // TASK 017: same duplicate-submission guard as the clip branch.
+    const duplicate = await findActiveJobForSourceUrl(sessionId, videoUrl);
+    if (duplicate) {
+      throw new ApiError(
+        409,
+        "You already have an active job for this video. Check its progress, or wait for it to finish before creating another one."
+      );
+    }
     await insertJob({
       id,
       sessionId,

@@ -348,7 +348,10 @@ def test_no_clips_fails_permanently(ffmpeg_bin, ffprobe_bin, synthetic_videos, t
     store = FakeClipStore([])
     renderer = FakeRenderer()
     run(make_processor(settings, queue, storage, store, renderer).process_job(make_job()))
-    assert queue.fail_calls == [(JOB_ID, WORKER, ERROR_NO_CLIPS_TO_RENDER, "the job has no clips to render", True)]
+    # TASK 017: the message is actionable (tells the user what to do).
+    assert queue.fail_calls == [(JOB_ID, WORKER, ERROR_NO_CLIPS_TO_RENDER,
+                                 "no renderable clips remain for this job — it cannot be completed. "
+                                 "Please create the job again.", True)]
     assert queue.complete_calls == []
     assert renderer.calls == []
 

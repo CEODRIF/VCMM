@@ -1,6 +1,17 @@
 import "server-only";
 
+import { ApiError } from "@/lib/api/errors";
 import { getSupabaseServerClient } from "@/lib/supabase/server";
+
+/**
+ * TASK 017 — production upload-failure investigation: every wrapper below
+ * converted its Supabase REST error into a raw `Error`, which the routes
+ * masked as a generic 500 "Internal server error." with no actionable
+ * message. They now throw a typed, sanitized ApiError (503 = the database
+ * is the failing dependency; the user is told EXACTLY what did NOT happen,
+ * so a failed operation can never be mistaken for a completed one) while
+ * the diagnostic detail (error code) stays in the server log.
+ */
 
 /**
  * Job data access (server-only, service role).
@@ -107,7 +118,11 @@ export async function insertJob(input: NewJobInput): Promise<{ id: string }> {
     .select("id")
     .single();
   if (error) {
-    throw new Error(`Job creation failed: ${error.code ?? "unknown"}`);
+    console.error("[db] job creation failed:", error.code ?? "unknown");
+    throw new ApiError(
+      503,
+      "The database is temporarily unavailable — your job was NOT created. Please try again."
+    );
   }
   return (data as { id: string }) ?? { id: input.id };
 }
@@ -122,7 +137,8 @@ export async function findJobForSession(sessionId: string, jobId: string): Promi
     .eq("session_id", sessionId)
     .maybeSingle();
   if (error) {
-    throw new Error(`Job lookup failed: ${error.code ?? "unknown"}`);
+    console.error("[db] job lookup failed:", error.code ?? "unknown");
+    throw new ApiError(503, "The database is temporarily unavailable. Please try again.");
   }
   return (data as JobRow | null) ?? null;
 }
@@ -137,7 +153,8 @@ export async function listJobsForSession(sessionId: string, limit = 20): Promise
     .order("created_at", { ascending: false })
     .limit(limit);
   if (error) {
-    throw new Error(`Job list failed: ${error.code ?? "unknown"}`);
+    console.error("[db] job list failed:", error.code ?? "unknown");
+    throw new ApiError(503, "The database is temporarily unavailable. Please try again.");
   }
   return (data as JobRow[]) ?? [];
 }
@@ -171,7 +188,11 @@ export async function setUploadAuthorization(
     .eq("status", "uploading")
     .select("id");
   if (error) {
-    throw new Error(`Upload authorization update failed: ${error.code ?? "unknown"}`);
+    console.error("[db] upload authorization update failed:", error.code ?? "unknown");
+    throw new ApiError(
+      503,
+      "The database is temporarily unavailable — the upload authorization was NOT saved. Please retry."
+    );
   }
   // Exactly one row can match (primary key) — the guarded update either
   // touched it or it did not.
@@ -190,7 +211,8 @@ export async function countClipsForJob(jobId: string): Promise<number> {
     .select("id")
     .eq("job_id", jobId);
   if (error) {
-    throw new Error(`Clip count failed: ${error.code ?? "unknown"}`);
+    console.error("[db] clip count failed:", error.code ?? "unknown");
+    throw new ApiError(503, "The database is temporarily unavailable. Please try again.");
   }
   return (data ?? []).length;
 }
@@ -214,9 +236,85 @@ export async function markUploadComplete(sessionId: string, jobId: string): Prom
     .eq("status", "uploading")
     .select("id");
   if (error) {
-    throw new Error(`Upload completion update failed: ${error.code ?? "unknown"}`);
+    console.error("[db] upload completion update failed:", error.code ?? "unknown");
+    throw new ApiError(
+      503,
+      "The database is temporarily unavailable — the upload was NOT marked complete. Please retry the upload."
+    );
   }
   // Exactly one row can match (primary key) — the guarded update either
   // touched it or it did not.
+  return (data ?? []).length;
+}
+
+/**
+ * TASK 017 — non-terminal job statuses (a job in any of these is "active").
+ * 'completed' and 'failed' are terminal: they release the source for
+ * re-submission and are subject to retention.
+ */
+const ACTIVE_JOB_STATUSES = [
+  "uploading",
+  "queued",
+  "validating",
+  "ready",
+  "transcribing",
+  "analyzing",
+  "rendering",
+] as const;
+
+/**
+ * TASK 017 — duplicate-submission guard: finds an ACTIVE job of the same
+ * session with the same source URL (exact string match — no guessing).
+ * Used by job creation to answer 409 instead of double-processing the
+ * same video (the client's double-click window is the realistic race).
+ */
+export async function findActiveJobForSourceUrl(
+  sessionId: string,
+  sourceUrl: string
+): Promise<{ id: string } | null> {
+  const supabase = getSupabaseServerClient();
+  const { data, error } = await supabase
+    .from("jobs")
+    .select("id")
+    .eq("session_id", sessionId)
+    .eq("source_url", sourceUrl)
+    .in("status", [...ACTIVE_JOB_STATUSES])
+    .limit(1);
+  if (error) {
+    console.error("[db] active job lookup failed:", error.code ?? "unknown");
+    throw new ApiError(503, "The database is temporarily unavailable. Please try again.");
+  }
+  return (data as { id: string }[] | null)?.[0] ?? null;
+}
+
+/**
+ * TASK 017 — user cancellation of an upload in progress:
+ * 'uploading' → 'failed' (a legal transition since the initial schema).
+ * The state guard makes a double-cancel impossible — only the first caller
+ * transitions the row. Returns the number of updated rows (0 when the job
+ * was already finalized, cancelled, or is no longer an upload job).
+ *
+ * The terminal transition arms the Phase 6 retention deadline, so a
+ * partially uploaded object (if any) is covered by the existing purge
+ * path instead of leaking forever.
+ */
+export async function cancelUploadJob(jobId: string): Promise<number> {
+  const supabase = getSupabaseServerClient();
+  const { data, error } = await supabase
+    .from("jobs")
+    .update({
+      status: "failed",
+      last_error: "Cancelled by user — the upload was not completed.",
+    })
+    .eq("id", jobId)
+    .eq("status", "uploading")
+    .select("id");
+  if (error) {
+    console.error("[db] job cancellation failed:", error.code ?? "unknown");
+    throw new ApiError(
+      503,
+      "The database is temporarily unavailable — the job was NOT cancelled. Please try again."
+    );
+  }
   return (data ?? []).length;
 }

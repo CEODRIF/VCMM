@@ -60,6 +60,8 @@ class IngestionWorker:
         self._started_at: float = 0.0
         self._last_claim_error_at: float | None = None
         self._consecutive_claim_errors: int = 0
+        # TASK 017: idle-cycle stale-upload reaper, throttled (see _loop).
+        self._last_reap_at: float = 0.0
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -277,6 +279,11 @@ class IngestionWorker:
                     task = asyncio.create_task(self._guarded(job), name=f"job-{job['id']}")
                     self._active.add(task)
                     task.add_done_callback(self._active.discard)
+                else:
+                    # TASK 017: an idle cycle is the only safe moment to
+                    # reap zombie 'uploading' jobs (bounded, throttled,
+                    # never on the hot claim path).
+                    await self._maybe_reap_stale_uploads()
             except QueueError as exc:
                 self._consecutive_claim_errors += 1
                 self._last_claim_error_at = time.monotonic()
@@ -299,6 +306,36 @@ class IngestionWorker:
                 pass
             m.gauge_uptime(time.monotonic() - self._started_at)
             m.gauge_active_jobs(len(self._active))
+
+    async def _maybe_reap_stale_uploads(self) -> None:
+        """TASK 017 — fail zombie 'uploading' jobs (client died mid-upload).
+
+        Throttled to one RPC per 60 s of idle time. The age threshold
+        (``upload_stale_age_seconds``, default 1080 s) MUST exceed the API
+        upload-authorization TTL (default 900 s): beyond it, finalization
+        is impossible, so the reaper cannot kill a still-salvageable
+        upload. The terminal transition arms the Phase 6 retention
+        deadline for any partially uploaded object. Any failure here is
+        logged and swallowed — the reaper is best-effort per cycle and a
+        DB blip must never take down the claim loop.
+        """
+        now = time.monotonic()
+        if now - self._last_reap_at < 60.0:
+            return
+        self._last_reap_at = now
+        try:
+            reaped = await self._queue.reap_stale_uploading_jobs(
+                self._settings.upload_stale_age_seconds,
+            )
+            if reaped:
+                logger.info(
+                    "reaped %d stale uploading job(s) (age > %ds)",
+                    reaped, self._settings.upload_stale_age_seconds,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — reaper boundary (best-effort)
+            logger.warning("stale-upload reap failed (will retry next cycle): %s", exc.__class__.__name__)
 
     def _processor_for(self, job: dict):
         """Stage-aware dispatch (Phases 3-5): validating → ingestion,

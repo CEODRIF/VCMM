@@ -238,6 +238,22 @@ class SupabaseQueue:
         )
         return bool(rows)
 
+    async def reap_stale_uploading_jobs(self, max_age_seconds: int) -> int:
+        """TASK 017: fail jobs stuck in 'uploading' beyond ``max_age_seconds``.
+
+        A client that dies mid-upload leaves the job in 'uploading' forever
+        (claim_next_job never takes it, and finalization is impossible once
+        the upload authorization expired). The terminal transition arms the
+        Phase 6 retention deadline, so any partially uploaded object is
+        covered by the existing purge path. Returns the reaped row count;
+        transport failures raise :class:`QueueError` (the loop must log and
+        continue — the reaper is best-effort per cycle).
+        """
+        result = await self._rpc(
+            "reap_stale_uploading_jobs", {"p_max_age_seconds": int(max_age_seconds)},
+        )
+        return int(result or 0)
+
     async def _table_update(self, table: str, values: dict[str, Any], where: dict[str, Any], select: str) -> list[dict[str, Any]]:
         try:
             builder = self._client.table(table).update(values)

@@ -31,6 +31,9 @@ class FakeQueue:
         self.releases: list[tuple[str, str]] = []
         self.fail_calls: list = []
 
+    async def reap_stale_uploading_jobs(self, max_age_seconds):  # TASK 017 no-op
+        return 0
+
     async def claim_next_job(self, worker_id, lease_seconds):
         return None
 

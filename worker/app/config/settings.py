@@ -52,6 +52,13 @@ class Settings(BaseSettings):
     #: single-claim wall time, and directories of this worker's ACTIVE jobs
     #: are never touched — so a live job's scratch can never be deleted.
     worker_tmp_stale_seconds: int = Field(default=172800, ge=3600)
+    #: TASK 017: age after which an 'uploading' job is reaped (failed) by
+    #: the worker's idle-cycle reaper. MUST stay above the API's upload
+    #: authorization TTL (UPLOAD_AUTH_TTL_SECONDS, default 900 s) — beyond
+    #: that TTL the client can no longer finalize the upload, so reaping
+    #: loses nothing. The terminal transition arms Phase 6 retention for
+    #: any partially uploaded object.
+    upload_stale_age_seconds: int = Field(default=1080, ge=60)
     #: Lease duration claimed per job (seconds). Must be >= 30 (RPC rule).
     job_lease_seconds: int = Field(default=300, ge=30, le=3600)
     #: Reference retry budget; the authoritative per-job limit is the

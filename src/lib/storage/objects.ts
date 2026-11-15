@@ -1,6 +1,7 @@
 import "server-only";
 
 import { uploadConfig } from "@/config/uploads";
+import { ApiError } from "@/lib/api/errors";
 import { getSupabaseServerClient } from "@/lib/supabase/server";
 
 /**
@@ -29,7 +30,16 @@ export async function createSourceUploadUrl(path: string): Promise<{ signedUrl: 
     .from(uploadConfig.sourcesBucket)
     .createSignedUploadUrl(path, { upsert: false });
   if (error || !data) {
-    throw new Error(`Signed upload URL creation failed: ${error?.message ?? "unknown"}`);
+    // TASK 017: a storage API failure here used to surface as a generic
+    // 500 "Internal server error." with no indication of what happened to
+    // the file. Now typed + actionable — and explicit that NOTHING was
+    // uploaded (no link was issued, so no transfer could have started).
+    console.error("[storage] signed upload URL creation failed:", error?.message ?? "unknown");
+    throw new ApiError(
+      502,
+      "Private storage is temporarily unavailable, so an upload link could not be issued. " +
+        "Your file was NOT uploaded — please retry in a moment."
+    );
   }
   return { signedUrl: data.signedUrl };
 }
@@ -54,7 +64,15 @@ export async function verifySourceObject(jobId: string, expectedPath: string | n
     .from(uploadConfig.sourcesBucket)
     .list(directory);
   if (error) {
-    throw new Error(`Storage verification failed: ${error.message}`);
+    // TASK 017: typed + actionable. The transfer itself MAY have reached
+    // storage, but it CANNOT be confirmed — the message never claims
+    // success and never claims loss.
+    console.error("[storage] object verification failed:", error.message);
+    throw new ApiError(
+      502,
+      "Private storage is temporarily unavailable, so the uploaded file could not be verified. " +
+        "The job was NOT completed — please retry the upload."
+    );
   }
 
   const item = (data ?? []).find((entry) => entry.name === expectedName);
