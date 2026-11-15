@@ -90,6 +90,10 @@ class ScoredClip:
     score: float  # 0-100
     criterions: tuple[CriterionScore, ...] = field(default_factory=tuple)
     scoring: dict = field(default_factory=dict)
+    #: TASK 015 P3: the generation mode that produced this clip
+    #: ('highlights' = Mode B viral highlights — the default; 'full_coverage'
+    #: = Mode A full-video tiling, neutral score, complete coverage).
+    mode: str = "highlights"
     #: Real transcribed words overlapping [start, end] (ABSOLUTE audio time),
     #: clipped to the window (Phase 5B captions). Never fabricated: only the
     #: transcribed tokens themselves (or their honest proportional

@@ -100,6 +100,7 @@ class SupabaseClipStore:
             "score": clip.score,
             "scoring": clip.scoring,
             "captions": captions,
+            "mode": clip.mode,
             "sort_order": index,
             "status": "pending",
             "storage_path": None,

@@ -58,6 +58,12 @@ class RenderSpec:
     height: int = 1920
     aspect_ratio: str = "9:16"
     fps: int = 30
+    #: TASK 015 P3: the user's EXPLICIT output frame-rate choice (30 or 60)
+    #: from ``jobs.output_fps``. None (legacy jobs) = source-rate-preserving
+    #: render (the output never exceeds the measured source rate). 60 from
+    #: a sub-55fps source duplicates frames to reach 60 — the output IS
+    #: 60fps; it is never claimed to be native 60fps source material.
+    target_fps: float | None = None
     #: Burn animated captions when words are present (job-level
     #: ``jobs.captions_enabled``, Phase 2 column).
     captions: bool = True

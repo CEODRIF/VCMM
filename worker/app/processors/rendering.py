@@ -153,8 +153,14 @@ class RenderProcessor:
             #    style form the base spec; per-clip real words come from the
             #    persisted `clips.captions` payload (Phase 5B).
             captions_enabled = bool(job.get("captions_enabled", True))
+            # TASK 015 P3: the user's explicit output frame rate (jobs
+            # .output_fps 30|60); None = legacy source-rate-preserving.
+            # Verified in the container after every render (ffprobe).
+            raw_fps = job.get("output_fps")
+            target_fps = float(raw_fps) if raw_fps in (30, 60, 30.0, 60.0) else None
             base_spec = RenderSpec(
                 captions=captions_enabled,
+                target_fps=target_fps,
                 caption_style=CaptionStyle(
                     font_family=self._settings.caption_font_family,
                     font_size=self._settings.caption_font_size,
@@ -241,6 +247,7 @@ class RenderProcessor:
                     spec = dataclasses.replace(base_spec, caption_words=tuple(words))
 
             async with semaphore:
+                out_fps = spec.target_fps  # explicit 30/60 choice or None (auto)
                 out_file = destination.parent / f"clip-{index}.mp4"
                 object_path = f"clips/{job_id}/{clip_id}.mp4"
                 try:
@@ -253,6 +260,7 @@ class RenderProcessor:
                             profile,
                             expected_duration=end - start,
                             timeout_seconds=self._settings.ffprobe_timeout_seconds,
+                            expected_fps=out_fps,
                         )
                     except RenderValidationError:
                         out_file.unlink(missing_ok=True)

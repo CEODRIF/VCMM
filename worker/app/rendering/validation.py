@@ -44,6 +44,10 @@ class RenderOutput:
     duration_seconds: float
     rotation: float
     file_size_bytes: int
+    #: Measured average frame rate (ffprobe avg_frame_rate); None = unknown.
+    fps: float | None = None
+    #: Measured audio stream duration (audio-sync fact); None = no audio.
+    audio_duration_seconds: float | None = None
 
 
 class RenderValidationError(ValueError):
@@ -199,6 +203,14 @@ async def probe_render_output(ffprobe_path: str, output: Path, timeout_seconds: 
     if duration <= 0 or width <= 0 or height <= 0:
         raise RenderValidationError("rendered file has invalid dimensions or duration")
 
+    def _rate(raw: Any) -> float | None:
+        try:
+            num, _, den = str(raw or "").partition("/")
+            den_f = float(den or 1)
+            return float(num) / den_f if den_f > 0 else None
+        except (TypeError, ValueError):
+            return None
+
     return RenderOutput(
         container=str(format_info["format_name"]),
         width=width,
@@ -209,6 +221,11 @@ async def probe_render_output(ffprobe_path: str, output: Path, timeout_seconds: 
         duration_seconds=round(duration, 3),
         rotation=_measured_rotation(video, output),
         file_size_bytes=output.stat().st_size,
+        fps=_rate(video.get("avg_frame_rate")) or _rate(video.get("r_frame_rate")),
+        audio_duration_seconds=(
+            round(float(audio.get("duration")), 3)
+            if audio and audio.get("duration") else None
+        ),
     )
 
 
@@ -227,11 +244,18 @@ async def verify_render_output(
     expected_duration: float,
     timeout_seconds: float,
     tolerance_ratio: float = 0.15,
+    expected_fps: float | None = None,
+    max_av_duration_drift: float = 0.2,
 ) -> RenderOutput:
     """Checks a rendered file against the full output contract.
 
     Raises :class:`RenderValidationError` (category ``render_invalid``,
     permanent) on any violation; returns the measured facts otherwise.
+
+    TASK 015 P3: ``expected_fps`` (the user's explicit 30/60 choice) is
+    verified against the MEASURED output rate — an output claimed as 60fps
+    must actually be 60fps in the container. ``max_av_duration_drift`` is
+    the audio/video duration bound (synchronization fact).
     """
     info = await probe_render_output(ffprobe_path, output, timeout_seconds)
 
@@ -256,5 +280,21 @@ async def verify_render_output(
             raise RenderValidationError(
                 f"output duration {info.duration_seconds}s deviates >{int(tolerance_ratio * 100)}% "
                 f"from the expected {expected_duration}s"
+            )
+
+    if expected_fps is not None:
+        if info.fps is None:
+            raise RenderValidationError("output frame rate could not be measured")
+        if abs(info.fps - expected_fps) / expected_fps > 0.05:
+            raise RenderValidationError(
+                f"output frame rate is {info.fps:g}fps, expected {expected_fps:g}fps"
+            )
+
+    if info.audio_duration_seconds is not None and expected_duration > 0:
+        av_drift = abs(info.audio_duration_seconds - info.duration_seconds)
+        if av_drift > max_av_duration_drift:
+            raise RenderValidationError(
+                f"audio/video desynchronized: audio {info.audio_duration_seconds}s "
+                f"vs container {info.duration_seconds}s"
             )
     return info

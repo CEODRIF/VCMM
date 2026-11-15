@@ -408,10 +408,11 @@ def test_intel_events_flow_into_the_same_timeline(tmp_path, ffmpeg_bin, ffprobe_
         {"family": "visual", "kind": "scene_cut", "t": 22.0, "t_end": 22.0,
          "strength": 0.7, "evidence": {}},
     ]
-    ok = run(processor._run_timeline(JOB_ID, WORKER_ID, 25.0, events, [],
-                                     Path("/nonexistent-src.bin")))
+    ok, rows = run(processor._run_timeline(JOB_ID, WORKER_ID, 25.0, events, [],
+                                           Path("/nonexistent-src.bin")))
     run(gemini.close())
     assert ok is True
+    assert rows is not None and len(rows) == 3  # the rows feed MODE B ranking
     assert sorted(tl.rows) == [0, 1, 2]
     row0 = tl.rows[0]
     assert row0["audio_evidence"]["events"][0]["kind"] == "energy_peak"
