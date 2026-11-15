@@ -79,13 +79,29 @@ export const createJobSchema = z
         message: "must be a plain file name",
       })
       .optional(),
-    clipCount: z.number().int().min(clips.minCount).max(clips.maxCount),
-    clipDurationSeconds: z.number().int().min(clips.minSeconds).max(clips.maxSeconds),
-    captionsEnabled: z.boolean().default(true),
-  })
-  .refine(
-    (data) => {
-       if (data.sourceType === "youtube") return Boolean(data.youtubeUrl);
+     /**
+      * TASK 015 P3 — generation mode:
+      * - "highlights" (default): viral-highlight candidates; clipCount is
+      *   a required upper bound (1..10).
+      * - "full_coverage": the ENTIRE source tiled into sequential clips of
+      *   clipDurationSeconds; the count is DERIVED at analysis time
+      *   (ceil(duration / clipDurationSeconds)) — clipCount is optional and
+      *   never truncates coverage.
+      */
+     generationMode: z.enum(["highlights", "full_coverage"]).default("highlights"),
+     clipCount: z.number().int().min(clips.minCount).max(clips.maxCount).optional(),
+     clipDurationSeconds: z.number().int().min(clips.minSeconds).max(clips.maxSeconds),
+     /**
+      * TASK 015 P3 — explicit output frame rate. 30 | 60. null/omitted =
+      * legacy source-rate-preserving render (never exceeds the measured
+      * source rate; 60 from a low-rate source duplicates frames — honest).
+      */
+     outputFps: z.union([z.literal(30), z.literal(60)]).nullish(),
+     captionsEnabled: z.boolean().default(true),
+   })
+   .refine(
+     (data) => {
+        if (data.sourceType === "youtube") return Boolean(data.youtubeUrl);
        if (data.sourceType === "twitch") return Boolean(data.twitchUrl ?? data.videoUrl);
        if (data.sourceType === "kick") {
          // TASK 015: Kick arrives via the universal videoUrl field and is
@@ -97,16 +113,29 @@ export const createJobSchema = z
          const videoUrl = data.videoUrl;
          return videoUrl !== undefined && classifyVideoUrl(videoUrl) === "direct-file";
        }
-       return Boolean(data.fileName);
-     },
+        return Boolean(data.fileName);
+      },
+      {
+        message:
+          "youtube sourceType requires youtubeUrl; twitch requires twitchUrl; " +
+          "kick requires a Kick VOD or channel URL; " +
+          "direct_url requires a direct video file URL (.mp4/.webm/.mov); upload requires fileName",
+        path: ["sourceType"],
+      }
+   )
+   .refine(
+     // TASK 015 P3: highlights mode REQUIRES an explicit clip count (its
+     // upper bound); full_coverage derives the count (clipCount ignored).
+     (data) =>
+       data.generationMode !== "highlights" ||
+       (data.clipCount !== undefined &&
+         data.clipCount >= clips.minCount &&
+         data.clipCount <= clips.maxCount),
      {
-       message:
-         "youtube sourceType requires youtubeUrl; twitch requires twitchUrl; " +
-         "kick requires a Kick VOD or channel URL; " +
-         "direct_url requires a direct video file URL (.mp4/.webm/.mov); upload requires fileName",
-       path: ["sourceType"],
+       message: `highlights mode requires clipCount between ${clips.minCount} and ${clips.maxCount}`,
+       path: ["clipCount"],
      }
-  );
+   );
 
 export type CreateJobInput = z.infer<typeof createJobSchema>;
 

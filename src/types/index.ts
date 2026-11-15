@@ -27,8 +27,15 @@ export interface Job {
   id: string;
   sourceType: SourceType;
   sourceUrl?: string;
-  requestedClips: number;
+  /** TASK 015 P3: null = full_coverage (derived at analysis time). */
+  requestedClips: number | null;
   clipDurationSeconds?: number;
+  /** TASK 015 P3: the generation mode (default 'highlights'). */
+  generationMode?: "highlights" | "full_coverage";
+  /** TASK 015 P3: explicit output frame rate (30|60) or null (legacy auto). */
+  outputFps?: number | null;
+  /** TASK 015 P3: the probed source duration (null before ingestion). */
+  sourceDurationSeconds?: number | null;
   status: ProcessingState;
   progress: number;
   createdAt: string;

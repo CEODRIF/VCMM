@@ -33,7 +33,11 @@ export interface JobRow {
   source_type: "youtube" | "twitch" | "kick" | "upload" | "direct_url";
   source_url: string | null;
   source_path: string | null;
-  requested_clips: number;
+  requested_clips: number | null;
+  /** TASK 015 P3: 'highlights' | 'full_coverage'. */
+  generation_mode: "highlights" | "full_coverage";
+  /** TASK 015 P3: explicit output frame rate (30|60) or null (legacy auto). */
+  output_fps: number | null;
   clip_duration_seconds: number;
   captions_enabled: boolean;
   status: JobStatus;
@@ -61,9 +65,18 @@ export interface NewJobInput {
   sourceType: "youtube" | "twitch" | "kick" | "upload" | "direct_url";
   sourceUrl?: string;
   sourcePath?: string;
-  requestedClips: number;
+  /**
+   * TASK 015 P3: null = "derived at analysis time" (full_coverage mode —
+   * ceil(source_duration / clip_duration_seconds), never truncated by a
+   * user count); number (1..10) = highlights upper bound.
+   */
+  requestedClips: number | null;
   clipDurationSeconds: number;
   captionsEnabled: boolean;
+  /** TASK 015 P3: 'highlights' (default) | 'full_coverage'. */
+  generationMode?: "highlights" | "full_coverage";
+  /** TASK 015 P3: explicit output frame rate (30|60) or null (legacy auto). */
+  outputFps?: number | null;
   /** Initial state: upload jobs wait for the file ('uploading'); provider-backed jobs start 'queued'. */
   initialStatus: "uploading" | "queued";
 }
@@ -82,6 +95,8 @@ export async function insertJob(input: NewJobInput): Promise<{ id: string }> {
       requested_clips: input.requestedClips,
       clip_duration_seconds: input.clipDurationSeconds,
       captions_enabled: input.captionsEnabled,
+      generation_mode: input.generationMode ?? "highlights",
+      output_fps: input.outputFps ?? null,
       status: input.initialStatus,
       progress: 0,
     })
