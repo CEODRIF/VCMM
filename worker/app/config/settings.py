@@ -300,6 +300,49 @@ class Settings(BaseSettings):
     kick_api_key: str | None = None
     #: Kick public API base (official value; overridable for tests).
     kick_api_base: str = "https://api.kick.com/public/v1"
+    # -- TASK 015: Gemini (semantic understanding only — never download/render) --
+    #: Comma-separated Gemini API keys (server-side only; NEVER logged,
+    #: never in URLs, never sent to clients). Multiple keys = workload
+    #: distribution + per-key cooldown rotation — NOT a quota bypass (all
+    #: keys of one project share the provider quota). Optional: without
+    #: any key the timeline is still built from measured local evidence +
+    #: transcript (honest 'not_configured' per-window state, zero
+    #: network calls).
+    gemini_api_keys: str | None = None
+    #: Legacy single-key form (GEMINI_API_KEY) — merged into the pool.
+    gemini_api_key: str | None = None
+    #: Model string sent to the API (operator config — model lineups
+    #: shift; nothing in this codebase hard-assumes a specific model).
+    gemini_model: str = Field(default="gemini-2.0-flash", min_length=3, max_length=200)
+    #: API base (official value; overridable for tests/private mirrors).
+    gemini_api_base: str = "https://generativelanguage.googleapis.com/v1beta"
+    gemini_timeout_seconds: float = Field(default=60.0, gt=0, le=1200)
+    #: Bounded retries for TRANSIENT failures (5xx/network) and rate
+    #: limits (429/quota) — across the key pool with exponential backoff.
+    #: PERMANENT errors (400/401/404) never retry.
+    gemini_max_retries: int = Field(default=2, ge=0, le=5)
+    gemini_backoff_seconds: float = Field(default=1.5, ge=0, le=60)
+    #: Per-key cooldown after a rate-limit/quota error (seconds).
+    gemini_cooldown_seconds: float = Field(default=120.0, ge=0, le=3600)
+    #: Per-request prompt bound (cost control).
+    gemini_max_prompt_chars: int = Field(default=8000, ge=1000, le=64000)
+    # -- TASK 015: full-timeline coverage ---------------------------------------
+    #: Timeline window length (seconds): the source is tiled sequentially
+    #: with this size; every window is represented in analysis_timeline.
+    gemini_timeline_window_seconds: int = Field(default=120, ge=10, le=900)
+    #: Hard cap on windows per job (cost bound). The window size WIDENS
+    #: to stay under the cap — coverage is never dropped.
+    gemini_timeline_max_windows: int = Field(default=240, ge=4, le=1024)
+    #: File-API global video-understanding pass (enrichment/context only
+    #: — NEVER proof of coverage; the window tile check is the proof).
+    #: Default OFF; when ON the source is uploaded to the File API, one
+    #: global pass runs, and the result feeds the per-window prompts.
+    gemini_video_understanding_enabled: bool = False
+    #: Hard cap for the File-API upload (bounded disk/network; the source
+    #: is NEVER duplicated into the DB — only the ~2GB local temp copy).
+    gemini_video_max_upload_bytes: int = Field(default=2_000_000_000, ge=10_000_000)
+    gemini_file_poll_attempts: int = Field(default=60, ge=1, le=600)
+    gemini_file_poll_interval: float = Field(default=2.0, ge=0.1, le=30)
     #: Provider API request timeout (metadata + token exchanges).
     provider_request_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
     #: Bounded retries for TRANSIENT provider failures (rate limits /
@@ -385,6 +428,8 @@ class Settings(BaseSettings):
         "twitch_client_secret",
         "twitch_oauth_refresh_token",
         "kick_api_key",
+        "gemini_api_keys",
+        "gemini_api_key",
     )
     @classmethod
     def _empty_provider_secret_to_none(cls, value: str | None) -> str | None:

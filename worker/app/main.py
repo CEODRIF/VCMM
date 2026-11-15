@@ -57,7 +57,19 @@ def build_worker(settings: Settings):
     # client). Its presence turns on the resumable intel pipeline as the
     # primary analysis path (the transcript detector remains the fallback).
     intel_store = IntelStore(client)
-    analysis = AnalysisProcessor(settings, queue, storage, transcriber, clip_store, intel_store=intel_store)
+    # TASK 015: full-timeline coverage — job-scoped timeline store + the
+    # Gemini client (multi-key pool from env; unconfigured = honest
+    # degradation, zero network calls). Gemini never downloads/renders.
+    from .ai.gemini import GeminiClient, gemini_config_from_settings
+    from .db.timeline_store import TimelineStore
+
+    timeline_store = TimelineStore(client)
+    gemini_client = GeminiClient(gemini_config_from_settings(settings))
+    analysis = AnalysisProcessor(
+        settings, queue, storage, transcriber, clip_store,
+        intel_store=intel_store, timeline_store=timeline_store,
+        gemini=gemini_client,
+    )
     profile = RenderProfile()
     renderer = FFmpegRenderer(
         settings.ffmpeg_path,

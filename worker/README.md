@@ -328,6 +328,15 @@ startup (see `app/config/settings.py`):
 | `WORKER_DIRECT_URL_TRANSFER_DEADLINE_SECONDS` | `1800` | TASK 014: total wall-clock budget for the WHOLE download (all attempts) — defeats slow-drip sources; `0`/unset behavior: 1800 default (per-request `WORKER_PROVIDER_REQUEST_TIMEOUT_SECONDS` still applies between bytes) |
 | `WORKER_KICK_API_KEY` | – | TASK 015: official Kick public API key (server-side only; sent in the `Authorization: APIKey …` header, NEVER the URL, never logged). Optional — without it, Kick URLs report honest unavailability with NO network call. **The key enables METADATA only**: Kick exposes no official VOD media-download endpoint, so Kick media is refused by design (export from Kick Studio, or upload) |
 | `WORKER_KICK_API_BASE` | `https://api.kick.com/public/v1` | TASK 015: overridable for tests/private mirrors |
+| `WORKER_GEMINI_API_KEYS` | – | TASK 015: comma-separated Gemini API keys (server-side only; header-only, never logged, never in URLs or DB records). Multi-key = workload distribution + per-key cooldown rotation — NOT a quota bypass (one project's keys share the provider quota). Optional: unconfigured = the timeline is still built from measured local evidence + transcript with an honest per-window `not_configured` state (zero network calls) |
+| `WORKER_GEMINI_API_KEY` | – | TASK 015: legacy single-key form (merged into the pool) |
+| `WORKER_GEMINI_MODEL` | `gemini-2.0-flash` | TASK 015: model string sent to the API (operator config — model lineups shift; nothing hard-assumes a name) |
+| `WORKER_GEMINI_API_BASE` | `https://generativelanguage.googleapis.com/v1beta` | TASK 015: overridable for tests/private mirrors |
+| `WORKER_GEMINI_MAX_RETRIES` | `2` | TASK 015: bounded retries for TRANSIENT (5xx/network) + quota (429) failures, with exponential backoff across the key pool; PERMANENT errors (400/401/404) never retry |
+| `WORKER_GEMINI_COOLDOWN_SECONDS` | `120` | TASK 015: per-key cooldown after a quota/rate-limit error |
+| `WORKER_GEMINI_TIMELINE_WINDOW_SECONDS` | `120` | TASK 015: full-timeline window size — the source is tiled sequentially with NO gaps/overlaps (every source second is represented in `analysis_timeline`) |
+| `WORKER_GEMINI_TIMELINE_MAX_WINDOWS` | `240` | TASK 015: cost cap — the window size WIDENS to stay under it, coverage is never dropped |
+| `WORKER_GEMINI_VIDEO_UNDERSTANDING_ENABLED` | `false` | TASK 015: optional File-API global video pass (context for the window prompts — NEVER proof of coverage; the window tile check is the proof). Off by default (cost) |
 | `WORKER_PROVIDER_REQUEST_TIMEOUT_SECONDS` | `10` | Phase 8: provider API + token-exchange timeout (0-120) |
 | `WORKER_PROVIDER_MAX_RETRIES` / `WORKER_PROVIDER_RETRY_BACKOFF_SECONDS` | `2` / `1.5` | Phase 8: bounded retries for TRANSIENT provider failures only (0-5 / 0-60) |
 | `WORKER_MATERIALIZE_MAX_SOURCE_BYTES` | `2 GiB` | Phase 8: hard cap on materialized sources (≥ 1 MiB) |
