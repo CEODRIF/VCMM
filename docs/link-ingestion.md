@@ -22,10 +22,45 @@ src/lib/validation/clips.ts is shared, the API gate wins)
    ├── twitch VOD/live  → 503 actionable refusal (no official VOD media API)
    ├── twitch CLIP      → 201 queued (worker imports via official
    │                       Get Clips Download — needs creator OAuth)
+   ├── kick VOD/live    → 503 honest refusal (no official VOD media API)
    ├── direct file URL  → 201 queued as source_type "direct_url"
    │                       (.mp4/.webm/.mov on any public host)
    └── unrecognized     → 400 validation error
 ```
+
+## Kick (TASK 015 — first-class provider)
+
+`worker/app/providers/kick.py` implements Kick as a first-class source
+adapter with the same honesty contract as YouTube / Twitch VOD:
+
+- **Classification** (shape only, no network): `kick.com` / `www.kick.com`
+  / `m.kick.com` (dot-boundary host matching — lookalikes rejected);
+  `/{channel}/v/{id}` = VOD, bare `/{channel}` = live/channel. Category
+  pages, non-numeric ids, non-standard ports, embedded credentials, and
+  non-http schemes are never claimed.
+- **Metadata** via the official public API
+  (`https://api.kick.com/public/v1`, header `Authorization: APIKey <key>`;
+  key from `WORKER_KICK_API_KEY`, server-side only, never logged or sent
+  to clients). An UNCONFIGURED deployment reports unavailability with the
+  exact setting name WITHOUT touching the network. Status mapping: 404 →
+  deleted (channel or VOD — Kick removes VODs 14-30 days after the
+  broadcast ends), 401/403 → key rejected, 429 → rate_limited, 5xx →
+  unavailable. Metadata carries title / duration / creator / canonical
+  URL / published-at (unknown fields stay unknown — never guessed).
+- **Media: REFUSED BY DESIGN.** Kick exposes no official VOD
+  media-download endpoint. `materialize` raises
+  `MaterializationUnavailable` with the actionable workarounds (export
+  from Kick Studio, or upload the file directly, or paste a public
+  file URL). No scraping/DRM-bypass/unofficial-endpoint path exists or
+  may be added.
+- **API gate**: `sourceType "kick"` is refused at job creation with a
+  distinct, actionable 503 per URL class (no job row is created).
+- **Registry**: Kick sits after the platform adapters and before
+  `direct_url` (claim order); every provider — upload, youtube, twitch,
+  kick, direct_url — now exposes the canonical 8-method universal
+  ingestion contract (`classify_url` / `validate_source` /
+  `fetch_metadata` / `acquire_media` / `stream_or_download` /
+  `report_progress` / `cleanup` — see `worker/app/providers/base.py`).
 
 ## Capability matrix (source by source)
 
@@ -35,6 +70,8 @@ src/lib/validation/clips.ts is shared, the API gate wins)
 | Twitch VOD (`twitch.tv/videos/{id}`, `/{channel}/videos/{id}`) | **No** — metadata only | Official Helix `/videos` (metadata) | client id (metadata) | API 503: "no authorized VOD media-download endpoint — export from the Twitch dashboard, or upload" |
 | Twitch LIVE (`/live/{channel}`, `/{channel}`) | **No** | Official Helix `/streams` (status) | client id | API 503: "live streams cannot be imported — wait for the VOD" |
 | Twitch **CLIP** (`twitch.tv/clips/{slug}`, `/{channel}/clip/{slug}`, `clips.twitch.tv/{slug}`) | **Yes** | Official Helix `GET /clips/downloads` (the only authorized media endpoint) | **creator OAuth**: `WORKER_TWITCH_OAUTH_REFRESH_TOKEN` (the clip owner's refresh token, scope `channel:manage:clips`) + client id/secret | Job fails PERMANENT with the actionable `provider_unauthorized` message naming the exact settings; no partial state |
+| Kick VOD (`kick.com/{channel}/v/{id}`) | **No** — metadata only | Official Kick public API (`GET /channels/{channel}/videos`, `Authorization: APIKey …`) | `WORKER_KICK_API_KEY` (metadata) | API 503: "no authorized VOD media-download endpoint (VODs expire 14-30 days) — export from Kick Studio, or upload" |
+| Kick LIVE (`kick.com/{channel}`) | **No** | Official Kick public API (`GET /channels/{channel}` — status) | `WORKER_KICK_API_KEY` | API 503: "live stream — wait for the VOD, or upload" |
 | Direct file URL (`https://…/…mp4/.webm/.mov`, any non-platform host, standard port) | **Yes** | SSRF-guarded streaming download → FFprobe validation → private bucket | none (public file) | typed permanent/retryable errors per cause (see below) |
 | Upload (file picker) | **Yes** (unchanged) | Signed URL → Supabase Storage | user's session | unchanged |
 

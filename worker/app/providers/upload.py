@@ -15,10 +15,10 @@ from typing import Any
 
 from ..queue.models import ERROR_STORAGE_DOWNLOAD
 from ..validation.media import MediaValidationError, probe_media
-from .base import STATUS_AVAILABLE, ProviderCheck
+from .base import STATUS_AVAILABLE, ProviderCheck, UniversalIngestionMixin
 
 
-class UploadProvider:
+class UploadProvider(UniversalIngestionMixin):
     name = "upload"
     supports_validation = True
     supports_materialization = True  # the file IS the source (private bucket)

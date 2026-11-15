@@ -75,6 +75,14 @@ const VIDEO_TAB_HINTS: Record<string, { tone: "ok" | "warn"; text: string }> = {
     tone: "warn",
     text: "Live stream — not a completed recording. Wait for the VOD, or upload the file directly.",
   },
+  "kick-vod": {
+    tone: "warn",
+    text: "Kick VOD — the official Kick API has no VOD media-download endpoint (VODs expire 14-30 days after the broadcast). Export from Kick Studio and upload the file directly.",
+  },
+  "kick-live": {
+    tone: "warn",
+    text: "Kick live stream — not a completed recording. Wait for the VOD, or upload the file directly.",
+  },
 };
 
 export function CreationForm() {
@@ -260,14 +268,16 @@ export function CreationForm() {
              // type (youtube → honest 503 refusal server-side; twitch
              // → per-class gate: clips queued, VOD/live actionable 503;
              // direct-file → queued as direct_url).
-             sourceType:
-               sourceType === "video"
-                 ? linkKind === "direct-file"
-                   ? "direct_url"
-                   : linkKind === "youtube"
-                     ? "youtube"
-                     : "twitch"
-                 : sourceType,
+              sourceType:
+                sourceType === "video"
+                  ? linkKind === "direct-file"
+                    ? "direct_url"
+                    : linkKind === "youtube"
+                      ? "youtube"
+                      : linkKind === "kick-vod" || linkKind === "kick-live"
+                        ? "kick"
+                        : "twitch"
+                  : sourceType,
              youtubeUrl:
                sourceType === "youtube"
                  ? youtubeUrl.trim()

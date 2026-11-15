@@ -111,6 +111,23 @@ export async function createJob(input: CreateJobInput, sessionId: string): Promi
     );
   }
 
+  if (input.sourceType === "kick") {
+    // TASK 015 — Kick as a first-class source. The platform FACT is
+    // refused at creation (distinct actionable 503, no job row): the
+    // official Kick public API exposes METADATA only — there is no
+    // authorized VOD media-download endpoint (and VODs expire 14-30
+    // days after the broadcast ends). No scraping/DRM-bypass path may
+    // be added; the workarounds are export or direct upload.
+    const kickUrl = input.videoUrl;
+    const kind = kickUrl ? classifyVideoUrl(kickUrl) : "unrecognized";
+    throw new ApiError(
+      503,
+      kind === "kick-live"
+        ? "This Kick URL is a live stream, not a completed recording — wait for the VOD, or upload the file directly."
+        : "Kick VOD media cannot be imported: the official Kick API exposes metadata but no authorized VOD media-download endpoint (Kick VODs expire 14-30 days after the broadcast ends). Export the recording from Kick Studio and upload the file directly."
+    );
+  }
+
   if (input.sourceType === "direct_url") {
     // TASK 014 — direct video file URL (the schema guarantees the URL
     // classified as a public file-shaped video link). The worker downloads

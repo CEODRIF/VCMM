@@ -255,6 +255,14 @@ class IngestionProcessor:
                         "(WORKER_DIRECT_URLS_ENABLED) — upload the file directly "
                         "instead"
                     )
+                elif provider.name == "kick":
+                    not_configured_message = (
+                        "the kick source provider is not configured on this "
+                        "deployment (WORKER_KICK_API_KEY) — and note Kick "
+                        "exposes no official VOD media-download endpoint, so "
+                        "export the recording from Kick Studio or upload the "
+                        "file directly instead"
+                    )
                 else:
                     not_configured_message = (
                         f"the {provider.name} source provider is not configured on this "

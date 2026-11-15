@@ -47,7 +47,33 @@ class ProviderCheck:
 
 @runtime_checkable
 class StreamProvider(Protocol):
-    """A source adapter. Provider-specific code stays behind this surface."""
+    """A source adapter. Provider-specific code stays behind this surface.
+
+    TASK 015 — universal ingestion contract. The canonical names required
+    by the product spec map onto this core surface; :class:`UniversalIngestionMixin`
+    provides the mapping so every adapter exposes the same 8-method
+    contract without a breaking refactor:
+
+    =========================  ==================================================
+    canonical name             implementation
+    =========================  ==================================================
+    ``classify_url(url)``       ``can_handle(url)`` — shape claim, no network
+    ``validate_source(url)``    ``validate(url)`` — availability + status
+    ``fetch_metadata(url)``     ``validate(url)`` → ``check.metadata``
+    ``acquire_media(url, dir)`` ``materialize(url, dir, progress=, should_cancel=)``
+    ``stream_or_download(...)`` bounded-chunk streaming transfer (the
+                                 :mod:`app.providers.http_guard` guarantees:
+                                 chunked reads, size cap, deadline, retry)
+                                 returning the acquired file size
+    ``report_progress(cb)``     progress flows through the ``progress``
+                                 keyword of ``acquire_media`` into the job
+                                 queue (the pipeline owns user-facing
+                                 progress; providers never log it)
+    ``cleanup(path)``           remove a locally acquired file (safe,
+                                 best-effort — the pipeline also rmtrees
+                                 its temp dir on every exit path)
+    =========================  ==================================================
+    """
 
     name: str
     supports_validation: bool
@@ -68,3 +94,51 @@ class StreamProvider(Protocol):
         """Produces a locally analyzable file. Adapters without an
         AUTHORIZED download path raise :class:`MaterializationUnavailable`."""
         raise NotImplementedError
+
+
+class UniversalIngestionMixin:
+    """TASK 015 — the canonical 8-method ingestion contract.
+
+    Concrete providers implement the three core methods (``can_handle``,
+    ``validate``, ``materialize``) and inherit this mixin to expose the
+    canonical names. The aliases are thin and deterministic — the
+    security guarantees live in the core implementations (SSRF guard,
+    bounded streaming, typed errors), never in this layer.
+    """
+
+    def classify_url(self, url: str) -> bool:
+        """Shape claim for the ingestion engine's auto-detection."""
+        return self.can_handle(url)
+
+    async def validate_source(self, url: str) -> ProviderCheck:
+        return await self.validate(url)
+
+    async def fetch_metadata(self, url: str) -> Any:
+        """Normalized metadata for AVAILABLE sources; None otherwise
+        (an unavailable source has no trustworthy metadata)."""
+        check = await self.validate(url)
+        return check.metadata if check.status == STATUS_AVAILABLE else None
+
+    async def acquire_media(self, url: str, destination_dir: Any, **kwargs: Any) -> Any:
+        """Authorized media acquisition → locally analyzable file."""
+        return await self.materialize(url, destination_dir, **kwargs)
+
+    async def stream_or_download(self, url: str, destination_dir: Any, **kwargs: Any) -> int:
+        """Bounded-chunk streaming transfer (see the module contract
+        table). Returns the acquired file size in bytes."""
+        path = await self.materialize(url, destination_dir, **kwargs)
+        return path.stat().st_size
+
+    def report_progress(self, progress: float) -> None:
+        """User-facing progress is pipeline-owned (queue writes); the
+        progress CALLBACK passed to acquire_media is the provider's
+        reporting channel. Kept as a no-op hook for contract symmetry."""
+        return None
+
+    def cleanup(self, path: Any) -> None:
+        """Best-effort removal of a locally acquired file (never raises)."""
+        try:
+            from pathlib import Path as _Path
+            _Path(str(path)).unlink(missing_ok=True)
+        except OSError:
+            pass

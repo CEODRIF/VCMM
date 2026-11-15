@@ -290,6 +290,16 @@ class Settings(BaseSettings):
     #: Official endpoint bases (overridable for tests/private mirrors).
     twitch_api_base: str = "https://api.twitch.tv/helix"
     twitch_oauth_base: str = "https://id.twitch.tv"
+    # -- TASK 015: Kick -----------------------------------------------------------
+    #: Kick public API key (server-side only; never logged, never sent to
+    #: clients, never echoed in error messages). Optional: without it,
+    #: Kick URLs are refused with a clear unavailability reason and NO
+    #: network call is made (never a fake success). NOTE: the key only
+    #: enables METADATA — Kick exposes no official VOD media-download
+    #: endpoint, so Kick media is refused by design (honest blocker).
+    kick_api_key: str | None = None
+    #: Kick public API base (official value; overridable for tests).
+    kick_api_base: str = "https://api.kick.com/public/v1"
     #: Provider API request timeout (metadata + token exchanges).
     provider_request_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
     #: Bounded retries for TRANSIENT provider failures (rate limits /
@@ -374,6 +384,7 @@ class Settings(BaseSettings):
         "twitch_client_id",
         "twitch_client_secret",
         "twitch_oauth_refresh_token",
+        "kick_api_key",
     )
     @classmethod
     def _empty_provider_secret_to_none(cls, value: str | None) -> str | None:

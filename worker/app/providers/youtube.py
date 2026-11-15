@@ -50,6 +50,7 @@ from .base import (
     STATUS_UNAVAILABLE,
     MaterializationUnavailable,
     ProviderCheck,
+    UniversalIngestionMixin,
 )
 from .errors import UnauthorizedError, redact
 from .http_guard import SafeHttpClient
@@ -163,7 +164,7 @@ class _OAuthTokenCache:
         await self._http.aclose()
 
 
-class YouTubeProvider:
+class YouTubeProvider(UniversalIngestionMixin):
     name = "youtube"
     supports_validation = True
     supports_materialization = False  # no official media-download API (honest)

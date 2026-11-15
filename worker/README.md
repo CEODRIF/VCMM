@@ -326,6 +326,8 @@ startup (see `app/config/settings.py`):
 | `WORKER_DIRECT_URLS_ENABLED` | `true` | TASK 014: switch for direct video-file URL imports (`direct_url` jobs). OFF → they fail permanently with "direct video URL import is disabled … upload the file directly" |
 | `WORKER_DIRECT_URL_HOST_ALLOWLIST` | – (any public host) | TASK 014: optional comma-separated allowlist for the PASTED host (hop 0 of the redirect chain). When set, only those hosts are accepted; later redirect hops stay public-only (never private/loopback) |
 | `WORKER_DIRECT_URL_TRANSFER_DEADLINE_SECONDS` | `1800` | TASK 014: total wall-clock budget for the WHOLE download (all attempts) — defeats slow-drip sources; `0`/unset behavior: 1800 default (per-request `WORKER_PROVIDER_REQUEST_TIMEOUT_SECONDS` still applies between bytes) |
+| `WORKER_KICK_API_KEY` | – | TASK 015: official Kick public API key (server-side only; sent in the `Authorization: APIKey …` header, NEVER the URL, never logged). Optional — without it, Kick URLs report honest unavailability with NO network call. **The key enables METADATA only**: Kick exposes no official VOD media-download endpoint, so Kick media is refused by design (export from Kick Studio, or upload) |
+| `WORKER_KICK_API_BASE` | `https://api.kick.com/public/v1` | TASK 015: overridable for tests/private mirrors |
 | `WORKER_PROVIDER_REQUEST_TIMEOUT_SECONDS` | `10` | Phase 8: provider API + token-exchange timeout (0-120) |
 | `WORKER_PROVIDER_MAX_RETRIES` / `WORKER_PROVIDER_RETRY_BACKOFF_SECONDS` | `2` / `1.5` | Phase 8: bounded retries for TRANSIENT provider failures only (0-5 / 0-60) |
 | `WORKER_MATERIALIZE_MAX_SOURCE_BYTES` | `2 GiB` | Phase 8: hard cap on materialized sources (≥ 1 MiB) |

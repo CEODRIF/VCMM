@@ -93,19 +93,25 @@ const TWITCH_VOD_PATH = /^\/(?:[a-z0-9_]{1,25}\/)?videos\/\d{1,15}$/;
  */
 const VIDEO_FILE_EXTENSIONS = [".mp4", ".webm", ".mov"] as const;
 /** Platform endpoints — never direct-file hosts (they have their own adapters + honest gates). */
-const PLATFORM_HOST_SUFFIXES = ["youtube.com", "youtu.be", "twitch.tv", "twitchcdn.net", "jtvnw.net"];
+const PLATFORM_HOST_SUFFIXES = ["youtube.com", "youtu.be", "twitch.tv", "twitchcdn.net", "jtvnw.net", "kick.com"];
 /** twitch.tv/clips/{slug} and twitch.tv/{channel}/clip/{slug}. */
 const TWITCH_CLIP_PATH = /^\/(?:[a-z0-9_]{1,25}\/)?clips?\/[a-z0-9][a-z0-9-]{0,99}(?:\/.*)?$/i;
 /** clips.twitch.tv/{slug} — the canonical clip short-link domain. */
 const CLIPS_SUBDOMAIN_PATH = /^\/[a-z0-9][a-z0-9-]{0,99}\/?$/i;
 /** twitch.tv/live/{channel} and bare /{channel} (live check). */
 const TWITCH_LIVE_PATH = /^\/(?:live\/)?[a-z0-9_]{1,25}\/?$/i;
+/** kick.com/{channel}/v/{id} — the canonical Kick VOD form. */
+const KICK_VOD_PATH = /^\/[a-z0-9_]{2,32}\/v\/\d{1,15}\/?$/i;
+/** kick.com/{channel} — bare channel (live check / profile). */
+const KICK_CHANNEL_PATH = /^\/[a-z0-9_]{2,32}\/?$/i;
 
 export type VideoUrlKind =
   | "youtube"
   | "twitch-vod"
   | "twitch-clip"
   | "twitch-live"
+  | "kick-vod"
+  | "kick-live"
   | "direct-file"
   | "unrecognized";
 
@@ -140,6 +146,14 @@ export function classifyVideoUrl(raw: string): VideoUrlKind {
     if (TWITCH_VOD_PATH.test(path)) return "twitch-vod";
     if (TWITCH_CLIP_PATH.test(path)) return "twitch-clip";
     if (path !== "/" && TWITCH_LIVE_PATH.test(path)) return "twitch-live";
+    return "unrecognized";
+  }
+
+  // TASK 015 — Kick: VOD path wins over the bare-channel (live) shape,
+  // mirroring the worker's KickProvider claim order.
+  if (isHost(host, "kick.com")) {
+    if (KICK_VOD_PATH.test(path)) return "kick-vod";
+    if (path !== "/" && KICK_CHANNEL_PATH.test(path)) return "kick-live";
     return "unrecognized";
   }
 

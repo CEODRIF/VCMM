@@ -253,11 +253,13 @@ class IngestionWorker:
         return {
             "youtube": yt,
             "twitch": tw,
+            "kick": "api-key" if s.kick_api_key else "unconfigured",
             "direct_url": "enabled" if s.direct_urls_enabled else "disabled",
             "master_switch": "on" if s.source_providers_enabled else "off",
             "materialization": (
                 "youtube: unsupported (no official media-download API — by design); "
                 "twitch: clips only (official Get Clips Download, creator OAuth); "
+                "kick: unsupported (no official VOD media-download endpoint — by design); "
                 "direct_url: enabled when direct_url=enabled"
             ),
         }

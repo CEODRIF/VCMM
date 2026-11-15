@@ -364,16 +364,19 @@ pull requests:
   `transcription_unavailable` error — no fake output is ever produced. With
   it, the first run downloads the selected model weights from Hugging Face
   once (plain file download, no API/credentials/cost).
-- YouTube/Twitch sources (Phase 8, TASK 011 → TASK 014): the worker retrieves
-  METADATA from the official APIs only (keyless oEmbed partial; YouTube Data
-  API v3 with an API key or OAuth; Twitch Helix with a client id or
-  app-access token) and classifies availability states honestly. YouTube
-  media and Twitch VOD/live media are NOT importable — the official APIs
-  expose no media-download endpoint — and the API returns a clear 503 at
-  creation (no job row). **Twitch CLIPs ARE importable** through the official
-  Get Clips Download endpoint, but only under the clip owner's OAuth
-  authorization (creator refresh token on the worker); without it the job
-  fails permanently with the actionable message. **Direct video-file URLs**
+- YouTube/Twitch/Kick sources (Phase 8, TASK 011 → TASK 015): the worker
+  retrieves METADATA from the official APIs only (keyless oEmbed partial;
+  YouTube Data API v3 with an API key or OAuth; Twitch Helix with a client id
+  or app-access token; **Kick public API** with `WORKER_KICK_API_KEY` —
+  metadata only) and classifies availability states honestly. YouTube
+  media, Twitch VOD/live media, and **Kick VOD/live media are NOT
+  importable** — the official APIs expose no media-download endpoint (Kick
+  VODs additionally expire 14-30 days after the broadcast) — and the API
+  returns a clear 503 at creation (no job row). **Twitch CLIPs ARE
+  importable** through the official Get Clips Download endpoint, but only
+  under the clip owner's OAuth authorization (creator refresh token on the
+  worker); without it the job fails permanently with the actionable message.
+  **Direct video-file URLs**
   (`.mp4`/`.webm`/`.mov` on public hosts) are imported through the
   SSRF-guarded path (docs/link-ingestion.md). No yt-dlp/cookies/DRM-bypass/
   scraping/unofficial-endpoint path exists in this codebase and none may be

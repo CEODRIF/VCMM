@@ -75,6 +75,7 @@ from .base import (
     STATUS_UNAVAILABLE,
     MaterializationUnavailable,
     ProviderCheck,
+    UniversalIngestionMixin,
 )
 from .errors import (
     InvalidUrlError,
@@ -292,7 +293,7 @@ class _CreatorTokenCache:
         await self._http.aclose()
 
 
-class TwitchProvider:
+class TwitchProvider(UniversalIngestionMixin):
     name = "twitch"
     supports_validation = True
     # TASK 014: clip URLs have an AUTHORIZED materialization path (the

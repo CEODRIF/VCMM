@@ -69,6 +69,7 @@ const MIGRATIONS = [
   "20261124000000_phase7_stream_intelligence.sql",
   "20261125000000_phase7b_intel_integration.sql",
   "20261126000000_task14_universal_link_source.sql",
+  "20261127000000_task15_kick_source.sql",
 ];
 const MIGRATIONS_DIR = join(process.cwd(), "supabase", "migrations");
 
@@ -129,6 +130,55 @@ describe("TASK 014 migration: direct_url source type", () => {
     );
     await db.exec(sql);
     const jobId = await seedJob("direct_url", "url");
+    expect(jobId).toBeTruthy();
+  });
+});
+
+
+describe("TASK 015 migration: kick source type", () => {
+  beforeAll(async () => {
+    // The task-014 "idempotent" test above re-applies the 20261126
+    // migration, which (correctly) resets the two CHECK constraints to the
+    // task-014 shape. Re-apply the LATEST migration (20261127) to restore
+    // the final schema state before exercising the kick branch.
+    const sql = readFileSync(
+      join(MIGRATIONS_DIR, "20261127000000_task15_kick_source.sql"),
+      "utf-8"
+    );
+    await db.exec(sql);
+  });
+
+  it("accepts a kick job carrying its link in source_url (schema alignment)", async () => {
+    // The API's honest gate never inserts kick rows today (no official
+    // media endpoint); this verifies the SCHEMA branch is consistent so
+    // the worker adapter + type system stay truthful if/when an
+    // authorized media path lands.
+    const jobId = await seedJob("kick", "url");
+    const rows = await q(`select source_type, source_url from public.jobs where id = '${jobId}'`);
+    expect(rows).toHaveLength(1);
+    const row = rows[0] as Row;
+    expect(row.source_type).toBe("kick");
+    expect(row.source_url).toBe("https://storage.example.com/streams/vod.mp4");
+  });
+
+  it("rejects a kick job without source_url (jobs_source_present)", async () => {
+    await expect(seedJob("kick", null)).rejects.toThrow();
+  });
+
+  it("leaves youtube/twitch/direct_url behavior unchanged after the kick migration", async () => {
+    await seedJob("direct_url", "url");
+    await seedJob("twitch", "url");
+    await seedJob("youtube", "url");
+    await expect(seedJob("vimeo", "url")).rejects.toThrow();
+  });
+
+  it("is idempotent (re-applying is a no-op)", async () => {
+    const sql = readFileSync(
+      join(MIGRATIONS_DIR, "20261127000000_task15_kick_source.sql"),
+      "utf-8"
+    );
+    await db.exec(sql);
+    const jobId = await seedJob("kick", "url");
     expect(jobId).toBeTruthy();
   });
 });
